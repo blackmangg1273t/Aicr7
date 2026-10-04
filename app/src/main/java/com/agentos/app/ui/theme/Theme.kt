@@ -1,13 +1,16 @@
 package com.agentos.app.ui.theme
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
@@ -49,7 +52,17 @@ object OsColors {
     val Warning = Color(0xFFFFC46B)
     val WarningContainer = Color(0xFF332814)
 
+    // Special surfaces
+    val CodeBg = Color(0xFF0B0E15)          // code blocks / raw viewers
+    val CodeBgHeader = Color(0xFF121623)    // code block header strip
+
     val AccentGradient = Brush.linearGradient(listOf(Accent, AccentViolet))
+
+    /** Ambient light: a soft radial bloom used behind key screens (cheap, no blur). */
+    val AmbientGlow = Brush.radialGradient(
+        colors = listOf(Color(0x147C9EFF), Color(0x00) ),
+        radius = 900f
+    )
 }
 
 /** Extended colors exposed alongside MaterialTheme.colorScheme. */
@@ -73,7 +86,9 @@ data class AgentOsColors(
     val error: Color = OsColors.Error,
     val errorContainer: Color = OsColors.ErrorContainer,
     val warning: Color = OsColors.Warning,
-    val warningContainer: Color = OsColors.WarningContainer
+    val warningContainer: Color = OsColors.WarningContainer,
+    val codeBg: Color = OsColors.CodeBg,
+    val codeBgHeader: Color = OsColors.CodeBgHeader
 )
 
 val LocalAgentOsColors = staticCompositionLocalOf { AgentOsColors() }
@@ -131,6 +146,39 @@ object OsShapes {
     val field: Shape = RoundedCornerShape(22.dp)
     val pill: Shape = RoundedCornerShape(50)
     val sheet: Shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp)
+    val code: Shape = RoundedCornerShape(12.dp)
+}
+
+/**
+ * AmbientBackdrop — a very soft accent bloom behind top-level screens.
+ * Pure gradient draws (no RenderScript/blur) so it is safe on low-RAM devices.
+ */
+@Composable
+fun AmbientBackdrop(modifier: Modifier = Modifier) {
+    val c = osColors()
+    Canvas(modifier.fillMaxWidth()) {
+        val w = size.width
+        val h = size.height
+        drawRect(c.bg)
+        // primary bloom — top center
+        drawCircle(
+            brush = Brush.radialGradient(
+                listOf(c.accent.copy(alpha = 0.085f), Color.Transparent),
+                radius = w * 0.75f
+            ),
+            radius = w * 0.75f,
+            center = androidx.compose.ui.geometry.Offset(w * 0.5f, -h * 0.1f)
+        )
+        // secondary bloom — violet, upper right, dimmer
+        drawCircle(
+            brush = Brush.radialGradient(
+                listOf(c.accentViolet.copy(alpha = 0.055f), Color.Transparent),
+                radius = w * 0.55f
+            ),
+            radius = w * 0.55f,
+            center = androidx.compose.ui.geometry.Offset(w * 0.95f, h * 0.12f)
+        )
+    }
 }
 
 @Composable
@@ -171,7 +219,9 @@ private fun lightOsColors() = AgentOsColors(
     error = Color(0xFFC0343F),
     errorContainer = Color(0xFFFFE1E3),
     warning = Color(0xFF9A6A0F),
-    warningContainer = Color(0xFFFFF0D4)
+    warningContainer = Color(0xFFFFF0D4),
+    codeBg = Color(0xFF10141C),
+    codeBgHeader = Color(0xFF1A2030)
 )
 
 /** Convenience accessor. */

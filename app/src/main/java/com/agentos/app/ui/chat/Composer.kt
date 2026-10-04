@@ -6,6 +6,8 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +18,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -29,15 +36,18 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
+import com.agentos.app.ui.components.rememberHaptics
 import com.agentos.app.ui.theme.OsMotion
 import com.agentos.app.ui.theme.OsShapes
 import com.agentos.app.ui.theme.osColors
 
 /**
- * Premium composer: layered field with focus glow, adaptive send button
- * and smooth multi-line expansion. Replaces the stock OutlinedTextField.
+ * Premium composer: layered field with TRUE focus glow (interaction state,
+ * not text presence), IME send support, adaptive send button and smooth
+ * multi-line expansion.
  */
 @Composable
 fun Composer(
@@ -49,14 +59,28 @@ fun Composer(
     placeholder: String = "Ask AgentOS anything…"
 ) {
     val c = osColors()
-    val focused = value.isNotEmpty()
+    val haptic = rememberHaptics()
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+
     val borderColor by animateColorAsState(
-        if (focused) c.borderStrong else c.border,
+        when {
+            focused -> c.accent.copy(alpha = 0.45f)
+            value.isNotEmpty() -> c.borderStrong
+            else -> c.border
+        },
         animationSpec = androidx.compose.animation.core.tween(OsMotion.Fast), label = "border"
     )
-    val glow by animateFloatAsState(if (focused) 0.5f else 0f, animationSpec = androidx.compose.animation.core.tween(OsMotion.Fast), label = "glow")
+    val glow by animateFloatAsState(if (focused) 0.55f else 0f, animationSpec = androidx.compose.animation.core.tween(OsMotion.Fast), label = "glow")
     val sendEnabled = value.isNotBlank() && enabled
     val sendScale by animateFloatAsState(if (sendEnabled) 1f else 0.86f, animationSpec = androidx.compose.animation.core.tween(OsMotion.Fast), label = "sendScale")
+
+    fun submit() {
+        if (sendEnabled) {
+            haptic()
+            onSend()
+        }
+    }
 
     Column(modifier) {
         Box(
@@ -69,8 +93,8 @@ fun Composer(
                         drawRoundRect(
                             brush = Brush.linearGradient(
                                 listOf(
-                                    c.accent.copy(alpha = glow * 0.55f),
-                                    c.accentViolet.copy(alpha = glow * 0.35f)
+                                    c.accent.copy(alpha = glow * 0.6f),
+                                    c.accentViolet.copy(alpha = glow * 0.4f)
                                 )
                             ),
                             cornerRadius = CornerRadius(22.dp.toPx()),
@@ -82,30 +106,30 @@ fun Composer(
                 .border(1.dp, borderColor, OsShapes.field)
                 .padding(horizontal = 16.dp, vertical = 10.dp)
         ) {
-            Column {
-                // text field
-                Box(Modifier.fillMaxWidth().heightIn(min = 24.dp)) {
-                    if (value.isEmpty()) {
-                        Text(
-                            placeholder,
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = c.textMuted
-                        )
-                    }
-                    BasicTextField(
-                        value = value,
-                        onValueChange = onValueChange,
-                        enabled = enabled,
-                        textStyle = TextStyle(
-                            color = c.textPrimary,
-                            fontSize = MaterialTheme.typography.bodyLarge.fontSize,
-                            lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
-                        ),
-                        cursorBrush = SolidColor(c.accent),
-                        maxLines = 6,
-                        modifier = Modifier.fillMaxWidth()
+            Box(Modifier.fillMaxWidth().heightIn(min = 24.dp)) {
+                if (value.isEmpty() && !focused) {
+                    Text(
+                        placeholder,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = c.textMuted
                     )
                 }
+                BasicTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    enabled = enabled,
+                    textStyle = TextStyle(
+                        color = c.textPrimary,
+                        fontSize = MaterialTheme.typography.bodyLarge.fontSize,
+                        lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
+                    ),
+                    cursorBrush = SolidColor(c.accent),
+                    maxLines = 6,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { submit() }),
+                    interactionSource = interaction,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
 
@@ -126,7 +150,7 @@ fun Composer(
                 color = c.textMuted,
                 modifier = Modifier.weight(1f)
             )
-            SendButton(enabled = sendEnabled, scale = sendScale, onClick = onSend)
+            SendButton(enabled = sendEnabled, scale = sendScale, onClick = { submit() })
         }
     }
 }
@@ -134,7 +158,7 @@ fun Composer(
 @Composable
 private fun SendButton(enabled: Boolean, scale: Float, onClick: () -> Unit) {
     val c = osColors()
-    val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val interaction = remember { MutableInteractionSource() }
     val bg by animateColorAsState(
         if (enabled) c.accent else c.surfaceInteractive,
         animationSpec = androidx.compose.animation.core.tween(OsMotion.Fast), label = "sendBg"
@@ -161,10 +185,11 @@ private fun SendButton(enabled: Boolean, scale: Float, onClick: () -> Unit) {
             ),
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            "➤",
-            color = if (enabled) androidx.compose.ui.graphics.Color(0xFF0A0C12) else c.textMuted,
-            style = MaterialTheme.typography.titleMedium
+        Icon(
+            Icons.Rounded.ArrowUpward,
+            contentDescription = "Send",
+            tint = if (enabled) androidx.compose.ui.graphics.Color(0xFF0A0C12) else c.textMuted,
+            modifier = Modifier.size(20.dp)
         )
     }
 }

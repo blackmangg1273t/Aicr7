@@ -1,11 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <path android:fillColor="#4F8CFF"
-        android:pathData="M54,30 L72,40 L72,60 L54,70 L36,60 L36,40 Z"/>
-    <path android:fillColor="#7BD88F"
-        android:pathData="M54,44 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0"/>
-    <path android:fillColor="#7BD88F"
-        android:pathData="M54,60 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0"/>
+
+    <!-- soft ambient glow behind the mark -->
+    <path android:fillColor="#147C9EFF"
+        android:pathData="M54,54 m-26,0 a26,26 0 1,0 52,0 a26,26 0 1,0 -52,0"/>
+
+    <!-- ✦ four-point sparkle with brand gradient -->
+    <path android:pathData="M54,22 C56.2,44.5 58.5,46.8 82,54 C58.5,61.2 56.2,63.5 54,86 C51.8,63.5 49.5,61.2 26,54 C49.5,46.8 51.8,44.5 54,22 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="30" android:startY="26"
+                android:endX="80" android:endY="84">
+                <item android:offset="0.0" android:color="#FF8FAEFF" />
+                <item android:offset="0.55" android:color="#FF7C9EFF" />
+                <item android:offset="1.0" android:color="#FFA78BFA" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- accent satellite dot (balance + motion hint) -->
+    <path android:fillColor="#A78BFA"
+        android:pathData="M70,33 m-3.4,0 a3.4,3.4 0 1,0 6.8,0 a3.4,3.4 0 1,0 -6.8,0"/>
 </vector>

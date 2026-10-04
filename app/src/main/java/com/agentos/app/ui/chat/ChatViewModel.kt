@@ -56,6 +56,7 @@ data class ChatUiState(
     val phase: ExecutionPhase = ExecutionPhase.NONE,
     val plan: List<PlanStepUi> = emptyList(),
     val attachments: List<AttachmentUi> = emptyList(),
+    val startedAtMs: Long? = null,         // wall time the task actually began
     val finalStatus: TaskStatus? = null,   // COMPLETED / FAILED / CANCELLED once done
     val finalResult: String? = null
 ) {
@@ -126,6 +127,7 @@ class ChatViewModel(
                 streamingAnswer = null,
                 plan = emptyList(),
                 attachments = emptyList(),
+                startedAtMs = System.currentTimeMillis(),
                 finalStatus = null,
                 finalResult = null,
                 planSummary = null
@@ -243,6 +245,7 @@ class ChatViewModel(
                 finalStatus = null,
                 finalResult = null,
                 taskId = null,
+                startedAtMs = System.currentTimeMillis(),
                 phase = ExecutionPhase.PLANNING,
                 currentAgent = "Main Agent",
                 currentActivity = "Understanding your request…"
@@ -268,7 +271,7 @@ class ChatViewModel(
     }
 
     fun clearExecution() {
-        _ui.value = _ui.value.copy(phase = ExecutionPhase.NONE, plan = emptyList(), attachments = emptyList(), finalStatus = null, finalResult = null)
+        _ui.value = _ui.value.copy(phase = ExecutionPhase.NONE, plan = emptyList(), attachments = emptyList(), finalStatus = null, finalResult = null, startedAtMs = null)
     }
 
     companion object {
