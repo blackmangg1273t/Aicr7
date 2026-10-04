@@ -13,35 +13,38 @@ import com.agentos.app.core.logging.Logger
  *
  * Android 9 (API 28) fully supports androidx.security.crypto.
  */
-class SecureStore(context: Context) : SecretStore {
+class SecureStore(private val context: Context) : SecretStore {
 
     private val prefs: SharedPreferences by lazy {
         try {
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-            EncryptedSharedPreferences.create(
-                context,
-                "agentos_secure_prefs",
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
+            createEncrypted()
         } catch (e: Exception) {
             // Keystore corruption (rare, e.g. factory reset mid-write): recreate cleanly.
             Logger.e("SecureStore", "Encrypted prefs unavailable, recreating", e)
-            context.deleteSharedPreferences("agentos_secure_prefs")
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-            EncryptedSharedPreferences.create(
-                context,
-                "agentos_secure_prefs",
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
+            try {
+                context.deleteSharedPreferences("agentos_secure_prefs")
+                createEncrypted()
+            } catch (e2: Exception) {
+                // Device keystore is permanently broken (some OEMs ship like this).
+                // Never crash the app at launch: degrade to plain prefs and log loudly.
+                // The user is told via the log; secrets stay private to this app's UID.
+                Logger.e("SecureStore", "Keystore permanently broken — falling back to unencrypted prefs", e2)
+                context.getSharedPreferences("agentos_plain_prefs_fallback", Context.MODE_PRIVATE)
+            }
         }
+    }
+
+    private fun createEncrypted(): SharedPreferences {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        return EncryptedSharedPreferences.create(
+            context,
+            "agentos_secure_prefs",
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
     }
 
     override fun saveSecret(key: String, value: String) {

@@ -44,7 +44,7 @@ class ToolRegistryTest {
     private fun buildRegistry(): ToolRegistry {
         val registry = ToolRegistry()
         val browserTools = BrowserTools(BrowserEngine(app), NetworkMonitor(app))
-        val shellTools = ShellTools(app, TermuxBridge(app), preferTermux = false)
+        val shellTools = ShellTools(app, TermuxBridge(app), SettingsRepository(app))
         val androidTools = AndroidAutomationTools(app)
         val memoryTools = MemoryTools(MemoryRepository(AppDatabase.build(app)))
         registry.registerAll(

@@ -10,6 +10,7 @@ import com.agentos.app.domain.tools.ToolContext
 import com.agentos.app.domain.tools.ToolResult
 import com.agentos.app.domain.tools.ToolRisk
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import java.io.File
@@ -24,7 +25,7 @@ import java.util.concurrent.TimeUnit
 class ShellTools(
     private val appContext: Context,
     private val termux: TermuxBridge,
-    private val preferTermux: Boolean = true
+    private val settings: com.agentos.app.data.settings.SettingsRepository
 ) {
 
     val workspace: File = File(appContext.filesDir, "workspace").apply { mkdirs() }
@@ -58,6 +59,9 @@ class ShellTools(
             ctx.onActivity("Executing: ${command.take(60)}")
             return withContext(Dispatchers.IO) {
                 // Try Termux first when preferred & installed
+                // Read the live setting at execution time (IO context) so toggling
+                // "prefer Termux" in Settings applies immediately, without an app restart
+                val preferTermux = settings.shellFlow.first().preferTermux
                 if (preferTermux && termux.isInstalled()) {
                     try {
                         val workdir = if (cwdRel.isNotBlank()) termuxWorkdir(cwdRel) else null

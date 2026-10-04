@@ -3,6 +3,7 @@ package com.agentos.app.di
 import android.content.Context
 import com.agentos.app.core.network.NetworkMonitor
 import com.agentos.app.core.security.SecureStore
+import com.agentos.app.core.security.SecretStore
 import com.agentos.app.data.accessibility.AndroidAutomationTools
 import com.agentos.app.data.browser.BrowserEngine
 import com.agentos.app.data.db.AppDatabase
@@ -24,6 +25,12 @@ import com.agentos.app.data.tools.ScreenshotTool
 import com.agentos.app.data.tools.ShellTools
 import com.agentos.app.data.tools.WebFetchTool
 import com.agentos.app.data.tools.WebSearchTool
+import com.agentos.app.ui.chat.ChatViewModel
+import com.agentos.app.ui.settings.SettingsViewModel
+import com.agentos.app.ui.tasks.TasksViewModel
+import com.agentos.app.ui.terminal.TerminalViewModel
+import org.koin.core.module.dsl.viewModelOf
+import org.koin.dsl.module
 import com.agentos.app.domain.agent.AgentRegistry
 import com.agentos.app.domain.agent.AndroidAgent
 import com.agentos.app.domain.agent.BrowserAgent
@@ -40,12 +47,20 @@ import org.koin.android.ext.koin.androidContext
 import org.koin.dsl.module
 
 val coreModule = module {
-    single<Context> { androidContext() }
+    // NOTE: do NOT declare single<Context> { androidContext() } here.
+    // In Koin 4.0, startKoin { androidContext(app) } already auto-registers the
+    // application Context, and Scope.androidContext() resolves get<Context>().
+    // Re-declaring it shadows the built-in definition and recurses into itself
+    // (StackOverflowError at first resolution = crash on every app launch).
     single<kotlinx.coroutines.CoroutineScope> {
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
     }
     single { SecureStore(androidContext()) }
+    // Engine depends on the SecretStore interface; bind it explicitly.
+    single<SecretStore> { get<SecureStore>() }
     single { NetworkMonitor(androidContext()) }
+    // TaskEngine depends on the ConnectivityChecker interface; NetworkMonitor implements it.
+    single<com.agentos.app.core.network.ConnectivityChecker> { get<NetworkMonitor>() }
     single { SettingsRepository(androidContext()) }
     single { OpenAiCompatibleProvider() }
     single { GeminiProvider() }
@@ -69,17 +84,19 @@ val coreModule = module {
 
     single { BrowserEngine(androidContext()) }
     single { TermuxBridge(androidContext()) }
-    single { ToolRegistry() }
     single { McpManager(get()) }
+    single { AndroidAutomationTools(androidContext()) }
 
-    // Tool implementations — every one of these is real, executable code.
+    // The ONE canonical ToolRegistry definition: constructs the registry and
+    // registers the full production tool set. Never split this into two
+    // ToolRegistry-typed definitions — Koin resolves get<ToolRegistry>() to the
+    // last registered definition of that type, which would recurse infinitely.
     single {
         val app = androidContext()
-        val registry = get<ToolRegistry>()
+        val registry = ToolRegistry()
         val browserTools = BrowserTools(get<BrowserEngine>(), get<NetworkMonitor>())
-        val preferTermux = kotlinx.coroutines.runBlocking { get<SettingsRepository>().shellFlow.first().preferTermux }
-        val shellTools = ShellTools(app, get<TermuxBridge>(), preferTermux)
-        val androidTools = AndroidAutomationTools(app)
+        val shellTools = ShellTools(app, get<TermuxBridge>(), get<SettingsRepository>())
+        val androidTools = get<AndroidAutomationTools>()
         val memoryTools = MemoryTools(get<MemoryRepository>())
 
         registry.registerAll(
@@ -97,7 +114,8 @@ val coreModule = module {
 }
 
 val agentsModule = module {
-    single { MainAgent(get<ProviderExecutor>()) }
+    // MainAgent depends on the AiExecutor interface — resolve by interface type.
+    single { MainAgent(get<com.agentos.app.data.provider.AiExecutor>()) }
 
     single {
         val registry = get<ToolRegistry>()
@@ -134,4 +152,17 @@ val agentsModule = module {
             contextProvider = { androidContext() }
         }
     }
+}
+
+/**
+ * UI layer: ViewModels. Without these definitions koinViewModel() throws
+ * NoDefinitionFoundException in MainActivity's first composition — a hard
+ * crash on every app launch. All constructor dependencies are singles in
+ * coreModule / agentsModule.
+ */
+val uiModule = module {
+    viewModelOf(::ChatViewModel)
+    viewModelOf(::TasksViewModel)
+    viewModelOf(::TerminalViewModel)
+    viewModelOf(::SettingsViewModel)
 }

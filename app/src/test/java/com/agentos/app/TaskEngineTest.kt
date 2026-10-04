@@ -101,7 +101,7 @@ class TaskEngineTest {
             com.agentos.app.data.tools.ShellTools(
                 appContext,
                 com.agentos.app.data.termux.TermuxBridge(appContext),
-                preferTermux = false
+                SettingsRepository(appContext)
             ).all()
         )
         val mainAgent = MainAgent(object : AiExecutor {
