@@ -1,3 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AgentOS</string>
+    <string name="accessibility_service_label">AgentOS Android Agent</string>
+    <string name="accessibility_service_description">Allows the AgentOS Android Agent to read the screen structure and perform taps, typing and scrolling on your behalf. Actions that modify data always require your explicit approval inside AgentOS. This service can be disabled at any time.</string>
+    <string name="task_notification_channel">Agent task execution</string>
+    <string name="task_notification_channel_desc">Shows progress while an agent task is running in the background.</string>
+    <string name="screen_capture_channel">Screen capture</string>
 </resources>

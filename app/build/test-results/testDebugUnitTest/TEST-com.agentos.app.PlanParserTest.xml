@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.agentos.app.PlanParserTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-10-04T13:54:24" hostname="c-6ac2405d-14810412-9765ac1cf4d6" time="0.046">
+  <properties/>
+  <testcase name="throwsWhenNoJsonAtAll" classname="com.agentos.app.PlanParserTest" time="0.006"/>
+  <testcase name="directAnswerWithStepsIsNotDirect" classname="com.agentos.app.PlanParserTest" time="0.017"/>
+  <testcase name="dropsUnknownAgents" classname="com.agentos.app.PlanParserTest" time="0.005"/>
+  <testcase name="parsesFencedJsonWithProse" classname="com.agentos.app.PlanParserTest" time="0.001"/>
+  <testcase name="extractsFirstBalancedObject" classname="com.agentos.app.PlanParserTest" time="0.0"/>
+  <testcase name="parsesCleanJson" classname="com.agentos.app.PlanParserTest" time="0.002"/>
+  <testcase name="extractReturnsNullWithoutBrace" classname="com.agentos.app.PlanParserTest" time="0.001"/>
+  <testcase name="capsStepsAtEight" classname="com.agentos.app.PlanParserTest" time="0.004"/>
+  <system-out><![CDATA[PlanParser: dropping step for unknown agent 'hacker_agent'
+]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

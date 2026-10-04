@@ -1,6 +1,0 @@
-{
-  "name": "AgentOS",
-  "description": "Multi-agent autonomous AI system and runtime for Android.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}

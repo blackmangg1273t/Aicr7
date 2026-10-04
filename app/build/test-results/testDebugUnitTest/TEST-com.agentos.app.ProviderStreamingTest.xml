@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.agentos.app.ProviderStreamingTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-10-04T13:54:24" hostname="c-6ac2405d-14810412-9765ac1cf4d6" time="0.182">
+  <properties/>
+  <testcase name="openAiCompatibleSseParserHandlesMessageShape" classname="com.agentos.app.ProviderStreamingTest" time="0.008"/>
+  <testcase name="openAiCompatibleReportsHttpErrorHonestly" classname="com.agentos.app.ProviderStreamingTest" time="0.143"/>
+  <testcase name="openAiCompatibleStreamsAndParsesSse" classname="com.agentos.app.ProviderStreamingTest" time="0.011"/>
+  <testcase name="geminiStreamsAndParsesSse" classname="com.agentos.app.ProviderStreamingTest" time="0.011"/>
+  <testcase name="geminiRequiresApiKey" classname="com.agentos.app.ProviderStreamingTest" time="0.007"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

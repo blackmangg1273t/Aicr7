@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.agentos.app.RedactorTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-10-04T13:54:24" hostname="c-6ac2405d-14810412-9765ac1cf4d6" time="0.02">
+  <properties/>
+  <testcase name="redactsOpenAiKeys" classname="com.agentos.app.RedactorTest" time="0.01"/>
+  <testcase name="loggerEntriesAreRedacted" classname="com.agentos.app.RedactorTest" time="0.001"/>
+  <testcase name="redactsKeyEqualsValue" classname="com.agentos.app.RedactorTest" time="0.0"/>
+  <testcase name="keepsNormalText" classname="com.agentos.app.RedactorTest" time="0.0"/>
+  <testcase name="redactsGithubTokensAndBearer" classname="com.agentos.app.RedactorTest" time="0.0"/>
+  <testcase name="redactsGoogleKeys" classname="com.agentos.app.RedactorTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

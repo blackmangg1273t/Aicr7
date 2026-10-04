@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.agentos.app.DuckDuckGoParserTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-10-04T13:54:19" hostname="c-6ac2405d-14810412-9765ac1cf4d6" time="0.215">
+  <properties/>
+  <testcase name="respectsMaxResults" classname="com.agentos.app.DuckDuckGoParserTest" time="0.204"/>
+  <testcase name="parsesStandardResults" classname="com.agentos.app.DuckDuckGoParserTest" time="0.01"/>
+  <testcase name="emptyHtmlYieldsNoResults" classname="com.agentos.app.DuckDuckGoParserTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
