@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
@@ -103,20 +104,25 @@ fun MainApp() {
             }
         }
     ) { padding ->
-        val modifier = Modifier.padding(padding)
-        when (tab) {
-            AppTab.CHAT -> ChatScreen(chatViewModel, messages, chatUi)
-            AppTab.TASKS -> {
-                val selectedTask by tasksViewModel.selectedTask.collectAsState()
-                val selectedSteps by tasksViewModel.selectedSteps.collectAsState()
-                val tasks by tasksViewModel.tasks.collectAsState()
-                TasksScreen(tasks, selectedTask, selectedSteps) { id -> tasksViewModel.select(id) }
+        // Apply the Scaffold insets to ALL tab screens. Without this, each screen
+        // renders full-bleed UNDER the bottom NavigationBar — e.g. the chat input
+        // bar was completely hidden behind it, so the screen looked empty and the
+        // user could not type or send anything.
+        Box(Modifier.padding(padding)) {
+            when (tab) {
+                AppTab.CHAT -> ChatScreen(chatViewModel, messages, chatUi)
+                AppTab.TASKS -> {
+                    val selectedTask by tasksViewModel.selectedTask.collectAsState()
+                    val selectedSteps by tasksViewModel.selectedSteps.collectAsState()
+                    val tasks by tasksViewModel.tasks.collectAsState()
+                    TasksScreen(tasks, selectedTask, selectedSteps) { id -> tasksViewModel.select(id) }
+                }
+                AppTab.TERMINAL -> {
+                    val termUi by terminalViewModel.ui.collectAsState()
+                    TerminalScreen(termUi, onRun = { terminalViewModel.run(it) }, onTestTermux = { terminalViewModel.testTermux() })
+                }
+                AppTab.SETTINGS -> SettingsScreen(settingsViewModel)
             }
-            AppTab.TERMINAL -> {
-                val termUi by terminalViewModel.ui.collectAsState()
-                TerminalScreen(termUi, onRun = { terminalViewModel.run(it) }, onTestTermux = { terminalViewModel.testTermux() })
-            }
-            AppTab.SETTINGS -> SettingsScreen(settingsViewModel)
         }
     }
 }

@@ -1,6 +1,7 @@
 package com.agentos.app.ui.chat
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -40,7 +41,9 @@ fun ChatScreen(
         if (target >= 0) listState.animateScrollToItem(target)
     }
 
-    Column(Modifier.fillMaxSize()) {
+    // imePadding: with edge-to-edge, adjustResize alone does not lift content above
+    // the keyboard — the input bar must pad by the IME inset explicitly.
+    Column(Modifier.fillMaxSize().imePadding()) {
         if (uiState.offline) {
             Surface(color = MaterialTheme.colorScheme.errorContainer) {
                 Text(
@@ -94,6 +97,9 @@ fun ChatScreen(
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            if (messages.isEmpty() && uiState.streamingAnswer == null) {
+                item { Box(Modifier.fillParentMaxSize()) { EmptyChatState() } }
+            }
             items(messages, key = { it.id }) { msg ->
                 MessageBubble(msg, uiState)
             }
@@ -155,6 +161,27 @@ fun ChatScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun EmptyChatState() {
+    Column(
+        Modifier.fillMaxSize().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text("AgentOS", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Your on-device AI assistant. Ask anything, or try:\n" +
+                "\u2022 \"Search for the latest news about AI\"\n" +
+                "\u2022 \"Open YouTube and play lo-fi music\"\n" +
+                "\u2022 \"Run df -h in the terminal\"",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
     }
 }
 
