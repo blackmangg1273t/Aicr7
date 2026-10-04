@@ -10,6 +10,8 @@ import com.agentos.app.domain.engine.TaskEngine
 import com.agentos.app.domain.model.EventType
 import com.agentos.app.domain.model.EventSeverity
 import com.agentos.app.domain.model.MessageRole
+import com.agentos.app.domain.model.PlanStepRequest
+import com.agentos.app.domain.model.StepStatus
 import com.agentos.app.domain.model.TaskEvent
 import com.agentos.app.domain.model.TaskStatus
 import com.agentos.app.service.TaskForegroundService
@@ -23,6 +25,23 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.UUID
 
+/** One plan step as shown in the execution card (real data from the planner). */
+data class PlanStepUi(
+    val index: Int,
+    val agent: String,
+    val tool: String?,
+    val why: String,
+    val status: StepStatus = StepStatus.PENDING,
+    val result: String? = null,
+    val error: String? = null
+)
+
+/** Screenshot / file attachment captured during execution. */
+data class AttachmentUi(val path: String, val caption: String)
+
+/** High-level execution phase (drives aura + status text). */
+enum class ExecutionPhase { NONE, PLANNING, EXECUTING, WAITING_APPROVAL, DONE }
+
 data class ChatUiState(
     val running: Boolean = false,
     val currentAgent: String? = null,
@@ -31,8 +50,19 @@ data class ChatUiState(
     val planSummary: String? = null,
     val pendingApproval: PendingApprovalUi? = null,
     val offline: Boolean = false,
-    val lastError: String? = null
-)
+    val lastError: String? = null,
+    // ---- execution visibility (all real, from engine events) ----
+    val taskId: String? = null,
+    val phase: ExecutionPhase = ExecutionPhase.NONE,
+    val plan: List<PlanStepUi> = emptyList(),
+    val attachments: List<AttachmentUi> = emptyList(),
+    val finalStatus: TaskStatus? = null,   // COMPLETED / FAILED / CANCELLED once done
+    val finalResult: String? = null
+) {
+    val completedSteps: Int get() = plan.count { it.status == StepStatus.COMPLETED }
+    val failedSteps: Boolean get() = plan.any { it.status == StepStatus.FAILED }
+    val activePlanStep: PlanStepUi? get() = plan.firstOrNull { it.status == StepStatus.RUNNING }
+}
 
 data class PendingApprovalUi(
     val stepId: String,
@@ -80,41 +110,113 @@ class ChatViewModel(
         return conv.id
     }
 
+    private fun updatePlan(taskId: String?, stepIndex: Int, transform: (PlanStepUi) -> PlanStepUi) {
+        if (taskId != null && taskId != _ui.value.taskId) return
+        _ui.value = _ui.value.copy(plan = _ui.value.plan.map { if (it.index == stepIndex) transform(it) else it })
+    }
+
     private fun onEngineEvent(ev: TaskEvent) {
         when (ev) {
             is TaskEvent.PlanningStarted -> _ui.value = _ui.value.copy(
-                running = true, currentAgent = "Main Agent", currentActivity = "Planning…", streamingAnswer = null
+                running = true,
+                taskId = ev.taskId,
+                phase = ExecutionPhase.PLANNING,
+                currentAgent = "Main Agent",
+                currentActivity = "Understanding your request…",
+                streamingAnswer = null,
+                plan = emptyList(),
+                attachments = emptyList(),
+                finalStatus = null,
+                finalResult = null,
+                planSummary = null
             )
             is TaskEvent.PlanCreated -> _ui.value = _ui.value.copy(
-                planSummary = if (ev.plan.directAnswer) "Direct answer" else "${ev.plan.steps.size} steps planned"
+                phase = if (ev.plan.directAnswer) ExecutionPhase.PLANNING else ExecutionPhase.EXECUTING,
+                plan = if (ev.plan.directAnswer) emptyList() else ev.plan.steps.mapIndexed { idx, s: PlanStepRequest ->
+                    PlanStepUi(
+                        index = idx,
+                        agent = s.agent,
+                        tool = s.tool,
+                        why = s.why.ifBlank { s.tool ?: "Step ${idx + 1}" }
+                    )
+                },
+                planSummary = if (ev.plan.directAnswer) "Direct answer" else "${ev.plan.steps.size} steps planned",
+                currentActivity = if (ev.plan.directAnswer) "Composing answer…" else null
             )
-            is TaskEvent.StepStarted -> _ui.value = _ui.value.copy(
-                running = true, currentAgent = ev.step.agentName,
-                currentActivity = ev.step.toolName?.let { "Using $it…" } ?: "Working…"
-            )
-            is TaskEvent.StepFinished -> _ui.value = _ui.value.copy(
-                currentAgent = null, currentActivity = null
-            )
+            is TaskEvent.StepStarted -> {
+                updatePlan(ev.taskId, ev.step.index) { it.copy(status = StepStatus.RUNNING, error = null) }
+                _ui.value = _ui.value.copy(
+                    running = true,
+                    taskId = ev.taskId,
+                    phase = if (_ui.value.phase == ExecutionPhase.PLANNING) ExecutionPhase.EXECUTING else _ui.value.phase,
+                    currentAgent = ev.step.agentName,
+                    currentActivity = ev.step.why.ifBlank { ev.step.toolName?.let { t -> "Using $t…" } ?: "Working…" }
+                )
+            }
+            is TaskEvent.StepFinished -> {
+                updatePlan(ev.taskId, ev.step.index) {
+                    it.copy(
+                        status = ev.step.status,
+                        result = ev.step.result,
+                        error = ev.step.error
+                    )
+                }
+                _ui.value = _ui.value.copy(
+                    currentAgent = null,
+                    currentActivity = null
+                )
+            }
             is TaskEvent.AgentActivity -> _ui.value = _ui.value.copy(currentActivity = ev.activity)
-            is TaskEvent.ApprovalRequired -> _ui.value = _ui.value.copy(
-                pendingApproval = PendingApprovalUi(ev.stepId, ev.tool, ev.args, ev.reason)
+            is TaskEvent.ToolStarted -> _ui.value = _ui.value.copy(
+                currentActivity = "Running ${ev.tool.replace('_', ' ')}…"
             )
-            is TaskEvent.ApprovalResolved -> _ui.value = _ui.value.copy(pendingApproval = null)
+            is TaskEvent.ToolFinished -> {
+                val note = if (ev.success) ev.output.take(80) else (ev.error ?: "failed")
+                _ui.value = _ui.value.copy(currentActivity = null)
+                Logger.d("ChatViewModel", "tool ${ev.tool}: $note")
+            }
+            is TaskEvent.ApprovalRequired -> _ui.value = _ui.value.copy(
+                pendingApproval = PendingApprovalUi(ev.stepId, ev.tool, ev.args, ev.reason),
+                phase = ExecutionPhase.WAITING_APPROVAL
+            )
+            is TaskEvent.ApprovalResolved -> _ui.value = _ui.value.copy(
+                pendingApproval = null,
+                phase = if (_ui.value.running) ExecutionPhase.EXECUTING else _ui.value.phase
+            )
             is TaskEvent.AssistantChunk -> _ui.value = _ui.value.copy(
                 streamingAnswer = (_ui.value.streamingAnswer ?: "") + ev.text
             )
-            is TaskEvent.Completed -> {
-                _ui.value = _ui.value.copy(running = false, streamingAnswer = null, currentAgent = null, currentActivity = null)
-            }
+            is TaskEvent.Attachment -> _ui.value = _ui.value.copy(
+                attachments = _ui.value.attachments + AttachmentUi(ev.path, ev.caption)
+            )
+            is TaskEvent.Completed -> _ui.value = _ui.value.copy(
+                running = false,
+                streamingAnswer = null,
+                currentAgent = null,
+                currentActivity = null,
+                phase = ExecutionPhase.DONE,
+                finalStatus = TaskStatus.COMPLETED,
+                finalResult = ev.finalResult
+            )
             is TaskEvent.Error -> _ui.value = _ui.value.copy(
-                running = false, lastError = ev.message, currentAgent = null, currentActivity = null
+                lastError = ev.message,
+                currentAgent = null,
+                currentActivity = null,
+                running = if (ev.recoverable) _ui.value.running else false,
+                phase = if (ev.recoverable) _ui.value.phase else ExecutionPhase.DONE,
+                finalStatus = if (ev.recoverable) _ui.value.finalStatus else TaskStatus.FAILED
             )
             is TaskEvent.TaskStatusChanged -> {
-                if (ev.status in setOf(TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)) {
-                    _ui.value = _ui.value.copy(running = false, streamingAnswer = null)
+                when (ev.status) {
+                    TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED -> _ui.value = _ui.value.copy(
+                        running = false,
+                        streamingAnswer = null,
+                        phase = ExecutionPhase.DONE,
+                        finalStatus = ev.status
+                    )
+                    else -> Unit
                 }
             }
-            else -> Unit
         }
     }
 
@@ -131,7 +233,20 @@ class ChatViewModel(
                     text = request
                 )
             )
-            _ui.value = _ui.value.copy(running = true, lastError = null, streamingAnswer = null, planSummary = null)
+            _ui.value = _ui.value.copy(
+                running = true,
+                lastError = null,
+                streamingAnswer = null,
+                planSummary = null,
+                plan = emptyList(),
+                attachments = emptyList(),
+                finalStatus = null,
+                finalResult = null,
+                taskId = null,
+                phase = ExecutionPhase.PLANNING,
+                currentAgent = "Main Agent",
+                currentActivity = "Understanding your request…"
+            )
             engine.start(request, convId)
         }
     }
@@ -150,6 +265,10 @@ class ChatViewModel(
 
     fun clearError() {
         _ui.value = _ui.value.copy(lastError = null)
+    }
+
+    fun clearExecution() {
+        _ui.value = _ui.value.copy(phase = ExecutionPhase.NONE, plan = emptyList(), attachments = emptyList(), finalStatus = null, finalResult = null)
     }
 
     companion object {

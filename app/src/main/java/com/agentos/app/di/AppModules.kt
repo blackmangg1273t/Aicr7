@@ -25,6 +25,7 @@ import com.agentos.app.data.tools.ScreenshotTool
 import com.agentos.app.data.tools.ShellTools
 import com.agentos.app.data.tools.WebFetchTool
 import com.agentos.app.data.tools.WebSearchTool
+import com.agentos.app.ui.agents.AgentsViewModel
 import com.agentos.app.ui.chat.ChatViewModel
 import com.agentos.app.ui.settings.SettingsViewModel
 import com.agentos.app.ui.tasks.TasksViewModel
@@ -165,4 +166,5 @@ val uiModule = module {
     viewModelOf(::TasksViewModel)
     viewModelOf(::TerminalViewModel)
     viewModelOf(::SettingsViewModel)
+    viewModelOf(::AgentsViewModel)
 }
