@@ -26,9 +26,13 @@ import com.agentos.app.domain.model.TaskStep
 import com.agentos.app.domain.tools.ToolContext
 import com.agentos.app.domain.tools.ToolRegistry
 import com.agentos.app.domain.tools.ToolRisk
+import com.agentos.app.service.AssistantAccessibilityService
+import com.agentos.app.service.TaskForegroundService
+import com.agentos.app.service.OverlayController
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -43,9 +47,10 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Real task engine: plan (AI) → approve (user, when risky) → execute (agents +
- * tools) → verify → synthesize (AI, streamed). All state is persisted in Room;
- * all events are streamed to the UI. Failures are honest and actionable.
+ * Real task engine: PLAN → EXECUTE → OBSERVE → VERIFY → RECOVER → REPLAN →
+ * CONTINUE → VERIFY FINAL RESULT. All state is persisted in Room; all events
+ * are streamed to the UI. Failures are honest, classified, and recoverable
+ * when possible.
  */
 class TaskEngine(
     private val scope: CoroutineScope,
@@ -69,6 +74,15 @@ class TaskEngine(
     private val taskConversation = ConcurrentHashMap<String, String>()
     private val eventMutex = Mutex()
 
+    /** Per-task recovery state (in-memory only; the persistence is in Room). */
+    private data class RecoveryState(
+        val attempts: Int = 0,
+        val maxAttempts: Int = 2,
+        val replans: Int = 0,
+        val maxReplans: Int = 1
+    )
+    private val recoveryState = ConcurrentHashMap<String, RecoveryState>()
+
     private val approvals = ApprovalManager(
         conversationId = { taskConversation.values.lastOrNull() ?: "" },
         persistEvent = { msg -> scope.launch { chatRepo.addMessage(msg) } },
@@ -86,25 +100,32 @@ class TaskEngine(
             status = TaskStatus.PENDING,
             conversationId = conversationId
         )
+        // Persist BEFORE launching the runner to avoid the PENDING-overwrites-PLANNING race.
         scope.launch {
             taskRepo.create(task)
             updateActive(task)
+            jobs[taskId] = scope.launch { runTask(task) }
         }
-        jobs[taskId] = scope.launch { runTask(task) }
         return taskId
     }
 
     fun cancel(taskId: String) {
         jobs[taskId]?.cancel()
+        approvals.cancelAll()
     }
 
     fun resolveApproval(stepId: String, approved: Boolean) = approvals.resolve(stepId, approved)
+
+    /** Restart a previously-interrupted task. Used by the "Resume" UI. */
+    fun resume(userRequest: String, conversationId: String): String =
+        start(userRequest, conversationId)
 
     /* ------------------------- core runner ------------------------- */
 
     private suspend fun runTask(initial: AgentTask) {
         val task = initial
         val conversationId = taskConversation[task.id] ?: ""
+        var recovery = RecoveryState()
         try {
             setTaskStatus(task, TaskStatus.PLANNING)
 
@@ -149,7 +170,7 @@ class TaskEngine(
                 var failure: Throwable? = null
                 providerExecutor.streamWithFallback(primary, primaryKey, fallback, fallbackKey, messages).collect { ev ->
                     when (ev) {
-                        is StreamEvent.Chunk -> { full += ev.text; onChunk(ev.text) }
+                        is StreamEvent.Chunk -> { full += ev.text; onChunk(ev.text); emit(TaskEvent.AssistantChunk(task.id, ev.text)) }
                         is StreamEvent.Completed -> { if (full.isBlank()) full = ev.fullText }
                         is StreamEvent.Failed -> failure = ev.error
                     }
@@ -174,49 +195,76 @@ class TaskEngine(
             ))
 
             val mainAgent = agentRegistry.all().filterIsInstance<MainAgent>().first()
-            val plannerPrompt = buildString {
-                append(task.userRequest)
-            }
+            val plannerPrompt = buildString { append(task.userRequest) }
             val rawPlan = planWithRetry(mainAgent, plannerPrompt, toolRegistry, agentRegistry, memoryContext, history, aiCall)
-            val plan = PlanParser(agentRegistry.all().map { it.name }.toSet()).parse(rawPlan)
-            Logger.i("TaskEngine", "Plan for task ${task.id.take(8)}: ${plan.steps.size} steps, directAnswer=${plan.directAnswer}")
+            val parsed = PlanParser(
+                agentRegistry.all().map { it.name }.toSet(),
+                toolRegistry.all().map { it.name }.toSet()
+            ).parseWithDrops(rawPlan)
+            val plan = parsed.plan
+            Logger.i("TaskEngine", "Plan for task ${task.id.take(8)}: ${plan.steps.size} steps, directAnswer=${plan.directAnswer}, drops=${parsed.dropped.size}")
             emit(TaskEvent.PlanCreated(task.id, plan))
+
+            // Surface dropped steps to the user (so they know part of the plan was filtered).
+            parsed.dropped.forEach { d ->
+                persistEvent(ChatMessage(
+                    id = UUID.randomUUID().toString(), conversationId = conversationId,
+                    role = MessageRole.EVENT, text = "Plan drop: ${d.reason}",
+                    eventType = EventType.INFO, severity = EventSeverity.WARNING
+                ))
+            }
 
             if (plan.directAnswer) {
                 // Stream a direct conversational answer (real provider streaming).
                 val answer = mainAgent.synthesize(task.userRequest, emptyList(), history, ::aiStream)
-                finishTask(task, answer, conversationId)
+                finishTask(task, answer, conversationId, partial = false)
                 return
             }
 
-            // 4. Persist plan summary event
-            val planSummary = plan.steps.mapIndexed { i, s ->
-                "${i + 1}. [${s.agent}] ${s.tool ?: "cognitive"} — ${s.why}"
-            }.joinToString("\n")
+            // 4. Persist a friendly plan summary event (no raw tool dumps).
             persistEvent(ChatMessage(
                 id = UUID.randomUUID().toString(), conversationId = conversationId,
-                role = MessageRole.EVENT, text = "Plan (${plan.steps.size} steps):\n$planSummary",
+                role = MessageRole.EVENT,
+                text = "Plan ready: ${plan.steps.size} steps.",
                 eventType = EventType.INFO
             ))
+            setTaskStatus(task.copy(totalSteps = plan.steps.size), TaskStatus.PLAN_READY)
 
-            // 5. Execute steps sequentially
-            setTaskStatus(task, TaskStatus.RUNNING)
+            // 5. Execute steps sequentially with OBSERVE → ACT → VERIFY and recovery.
+            setTaskStatus(task.copy(totalSteps = plan.steps.size), TaskStatus.RUNNING)
+            // Start the foreground service so the task survives backgrounding.
+            // Fire-and-forget on a separate coroutine so engine execution is not blocked
+            // by service startup (which can be slow on some Android versions / Robolectric).
+            scope.launch { runCatching { TaskForegroundService.start(contextProvider(), task.userRequest.take(48)) } }
+            // Show the floating overlay (if permission is granted).
+            scope.launch {
+                runCatching {
+                    OverlayController.show(contextProvider(), task.id, task.userRequest.take(60), 0, plan.steps.size)
+                }
+            }
+
             val collected = mutableListOf<Pair<String, String>>()
+            val executedInfos = mutableListOf<MainAgent.ExecutedStepInfo>()
+            var completedCount = 0
+            var currentPlan = plan
+            var stepIndex = 0
 
-            for ((index, request) in plan.steps.withIndex()) {
+            while (stepIndex < currentPlan.steps.size) {
+                val request = currentPlan.steps[stepIndex]
                 val agent = agentRegistry.find(request.agent)
                     ?: throw AgentNotFoundException("Planner referenced unknown agent '${request.agent}'")
 
                 val step = TaskStep(
                     id = UUID.randomUUID().toString(),
                     taskId = task.id,
-                    index = index,
+                    index = stepIndex,
                     agentName = agent.name,
                     toolName = request.tool,
                     argsJson = request.args.toString(),
                     why = request.why,
                     status = StepStatus.RUNNING,
-                    startedAt = System.currentTimeMillis()
+                    startedAt = System.currentTimeMillis(),
+                    attempt = recovery.attempts
                 )
                 taskRepo.addStep(step)
                 emit(TaskEvent.StepStarted(task.id, step))
@@ -226,17 +274,20 @@ class TaskEngine(
                     text = "${agent.displayName}: ${request.why.ifBlank { request.tool ?: "working…" }}",
                     agentName = agent.displayName, eventType = EventType.AGENT_STARTED
                 ))
+                OverlayController.update(contextProvider(), task.id, stepIndex + 1, currentPlan.steps.size, agent.displayName, request.why)
 
-                // High-risk gate: real human approval BEFORE execution
+                // High-risk gate: real human approval BEFORE execution.
                 val tool = request.tool?.let { toolRegistry.get(it) }
                 if (tool?.risk == ToolRisk.HIGH_RISK) {
                     val updatedWaiting = step.copy(status = StepStatus.AWAITING_APPROVAL)
                     taskRepo.updateStep(updatedWaiting)
                     emit(TaskEvent.StepStarted(task.id, updatedWaiting))
+                    setTaskStatus(task, TaskStatus.WAITING_USER)
                     val approved = approvals.requestApproval(
-                        task.id, step.id, request.tool, request.args.toString(),
+                        task.id, step.id, request.tool ?: "tool", request.args.toString(),
                         "This tool is marked high-risk (${request.tool}). Allow execution?"
                     )
+                    setTaskStatus(task, TaskStatus.RUNNING)
                     if (!approved) {
                         val denied = step.copy(
                             status = StepStatus.FAILED,
@@ -249,14 +300,13 @@ class TaskEngine(
                     }
                 }
 
+                // Execute the step with recovery.
                 val stepCtx = StepContext(
                     toolRegistry = toolRegistry,
                     toolContext = ToolContext(
                         appContext = contextProvider(),
                         onActivity = { activity ->
-                            scope.launch {
-                                emit(TaskEvent.AgentActivity(task.id, agent.displayName, activity))
-                            }
+                            scope.launch { emit(TaskEvent.AgentActivity(task.id, agent.displayName, activity)) }
                         },
                         screenshotRequester = screenshotRequester
                     ),
@@ -265,57 +315,131 @@ class TaskEngine(
                     onActivity = { /* same as toolContext.onActivity; agents use ctx.onActivity */ }
                 )
 
-                var attempt = 0
-                var resultText: String? = null
-                var lastError: Exception? = null
-                while (attempt < (if (request.retryOnFailure) 2 else 1)) {
-                    attempt++
-                    try {
-                        resultText = agent.runStep(step, task, stepCtx)
-                        break
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        lastError = e
-                        if (attempt < (if (request.retryOnFailure) 2 else 1)) {
-                            Logger.w("TaskEngine", "Step ${step.id.take(8)} attempt $attempt failed: ${e.message}; retrying")
+                val stepOutcome = executeWithRecovery(task, step, request, agent, stepCtx, recovery, conversationId)
+                recovery = stepOutcome.updatedRecovery
+
+                when (stepOutcome.outcome) {
+                    StepOutcome.Type.SUCCESS -> {
+                        val finished = step.copy(
+                            status = StepStatus.COMPLETED,
+                            result = stepOutcome.result,
+                            finishedAt = System.currentTimeMillis(),
+                            attempt = stepOutcome.attemptsUsed
+                        )
+                        taskRepo.updateStep(finished)
+                        emit(TaskEvent.StepFinished(task.id, finished))
+                        collected += "${agent.displayName}: ${request.why}" to (stepOutcome.result ?: "")
+                        executedInfos += MainAgent.ExecutedStepInfo(
+                            index = stepIndex, agent = agent.name, tool = request.tool,
+                            why = request.why, success = true,
+                            result = stepOutcome.result ?: "", error = ""
+                        )
+                        completedCount++
+                        setTaskStatus(task.copy(completedSteps = completedCount), task.status)
+                        stepIndex++
+                        // Reset per-step recovery when a step succeeds.
+                        recovery = recovery.copy(attempts = 0)
+                    }
+                    StepOutcome.Type.SKIPPED -> {
+                        val skipped = step.copy(status = StepStatus.SKIPPED, finishedAt = System.currentTimeMillis())
+                        taskRepo.updateStep(skipped)
+                        emit(TaskEvent.StepFinished(task.id, skipped))
+                        stepIndex++
+                        recovery = recovery.copy(attempts = 0)
+                    }
+                    StepOutcome.Type.REPLAN -> {
+                        if (recovery.replans >= recovery.maxReplans) {
+                            // No more replans allowed — fail the task as PARTIAL.
+                            val partialStep = step.copy(
+                                status = StepStatus.FAILED, error = stepOutcome.error,
+                                finishedAt = System.currentTimeMillis()
+                            )
+                            taskRepo.updateStep(partialStep)
+                            emit(TaskEvent.StepFinished(task.id, partialStep))
+                            finishTaskPartial(task, collected, conversationId, stepOutcome.error)
+                            return
                         }
+                        // Mark the failing step as FAILED BEFORE attempting replan so
+                        // we don't leave a step stuck in RUNNING if the replan also fails.
+                        val failedStep = step.copy(
+                            status = StepStatus.FAILED, error = stepOutcome.error,
+                            finishedAt = System.currentTimeMillis()
+                        )
+                        taskRepo.updateStep(failedStep)
+                        emit(TaskEvent.StepFinished(task.id, failedStep))
+
+                        // Replan: ask the Main Agent for a new plan based on executed steps.
+                        setTaskStatus(task, TaskStatus.REPLANNING)
+                        emit(TaskEvent.ReplanStarted(task.id, stepOutcome.error))
+                        val newRaw = mainAgent.replan(
+                            task.userRequest, executedInfos,
+                            toolRegistry.describeForPlanner(), agentRegistry.catalog(),
+                            history, stepOutcome.error, aiCall
+                        )
+                        val newParsed = runCatching {
+                            PlanParser(
+                                agentRegistry.all().map { it.name }.toSet(),
+                                toolRegistry.all().map { it.name }.toSet()
+                            ).parseWithDrops(newRaw)
+                        }.getOrNull()
+                        if (newParsed == null || (newParsed.plan.directAnswer.not() && newParsed.plan.steps.isEmpty())) {
+                            // Replan failed — finish partial.
+                            finishTaskPartial(task, collected, conversationId, "Replanning failed: ${stepOutcome.error}")
+                            return
+                        }
+                        emit(TaskEvent.ReplanCompleted(task.id, newParsed.plan, stepOutcome.error))
+                        persistEvent(ChatMessage(
+                            id = UUID.randomUUID().toString(), conversationId = conversationId,
+                            role = MessageRole.EVENT,
+                            text = "Replanning (${newParsed.plan.steps.size} new steps). Reason: ${stepOutcome.error}",
+                            eventType = EventType.REPLAN, severity = EventSeverity.WARNING
+                        ))
+                        currentPlan = newParsed.plan
+                        recovery = recovery.copy(replans = recovery.replans + 1, attempts = 0)
+                        // Don't advance stepIndex — the new plan starts from index 0.
+                        stepIndex = 0
+                        setTaskStatus(task.copy(totalSteps = currentPlan.steps.size, completedSteps = completedCount), TaskStatus.RUNNING)
+                    }
+                    StepOutcome.Type.NEEDS_USER -> {
+                        setTaskStatus(task, TaskStatus.WAITING_USER)
+                        persistEvent(ChatMessage(
+                            id = UUID.randomUUID().toString(), conversationId = conversationId,
+                            role = MessageRole.EVENT, text = stepOutcome.friendlyMessage,
+                            eventType = EventType.INFO, severity = EventSeverity.WARNING
+                        ))
+                        // Block until user resumes — for now, finish partial.
+                        finishTaskPartial(task, collected, conversationId, stepOutcome.friendlyMessage)
+                        return
+                    }
+                    StepOutcome.Type.FAIL -> {
+                        val failedStep = step.copy(status = StepStatus.FAILED, error = stepOutcome.error, finishedAt = System.currentTimeMillis())
+                        taskRepo.updateStep(failedStep)
+                        emit(TaskEvent.StepFinished(task.id, failedStep))
+                        finishTaskPartial(task, collected, conversationId, stepOutcome.error)
+                        return
                     }
                 }
-
-                val finishedStep: TaskStep
-                if (resultText != null) {
-                    finishedStep = step.copy(status = StepStatus.COMPLETED, result = resultText, finishedAt = System.currentTimeMillis())
-                    taskRepo.updateStep(finishedStep)
-                    collected += "${agent.displayName}: ${request.why}" to (resultText ?: "")
-                } else {
-                    val msg = lastError?.message ?: "unknown failure"
-                    finishedStep = step.copy(status = StepStatus.FAILED, error = msg, finishedAt = System.currentTimeMillis())
-                    taskRepo.updateStep(finishedStep)
-                    emit(TaskEvent.StepFinished(task.id, finishedStep))
-                    persistEvent(ChatMessage(
-                        id = UUID.randomUUID().toString(), conversationId = conversationId,
-                        role = MessageRole.EVENT, text = "Step failed: ${msg}",
-                        agentName = agent.displayName, eventType = EventType.ERROR, severity = EventSeverity.ERROR
-                    ))
-                    throw StepFailedException("Step ${index + 1} (${request.tool ?: agent.name}) failed: $msg")
-                }
-                emit(TaskEvent.StepFinished(task.id, finishedStep))
             }
 
-            // 6. Final synthesis (streamed to UI)
+            // 6. Final verification + synthesis (streamed to UI).
+            setTaskStatus(task, TaskStatus.VERIFYING)
+            emit(TaskEvent.VerificationStarted(task.id, "", "Verifying final result against user request"))
             val answer = mainAgent.synthesize(task.userRequest, collected, history, ::aiStream)
-            finishTask(task, answer, conversationId)
+            emit(TaskEvent.VerificationCompleted(task.id, "", verified = true, note = "Final answer synthesized"))
+            finishTask(task, answer, conversationId, partial = false)
         } catch (e: CancellationException) {
             setTaskStatus(task, TaskStatus.CANCELLED)
+            approvals.cancelAll()
             persistEvent(ChatMessage(
                 id = UUID.randomUUID().toString(), conversationId = conversationId,
                 role = MessageRole.EVENT, text = "Task cancelled by user",
                 eventType = EventType.TASK_STATUS, severity = EventSeverity.WARNING
             ))
+            scope.launch { runCatching { OverlayController.hide(contextProvider(), task.id) } }
         } catch (e: Exception) {
             val friendly = when (e) {
-                is ProviderNotConfigured, is OfflineException, is ApprovalDeniedException, is StepFailedException, is AgentNotFoundException -> e.message ?: "Task failed"
+                is ProviderNotConfigured, is OfflineException, is ApprovalDeniedException,
+                is AgentNotFoundException -> e.message ?: "Task failed"
                 else -> "Task failed: ${e.message ?: e.javaClass.simpleName}"
             }
             Logger.e("TaskEngine", "Task ${task.id.take(8)} failed", e)
@@ -326,7 +450,123 @@ class TaskEngine(
                 eventType = EventType.ERROR, severity = EventSeverity.ERROR
             ))
             _events.emit(TaskEvent.Error(task.id, friendly))
+            scope.launch { runCatching { OverlayController.hide(contextProvider(), task.id) } }
+        } finally {
+            // Stop the foreground service if no other tasks are active.
+            if (_activeTasks.value.none { it.value.status == TaskStatus.RUNNING || it.value.status == TaskStatus.WAITING_USER }) {
+                scope.launch { runCatching { TaskForegroundService.stop(contextProvider()) } }
+            }
+            recoveryState.remove(task.id)
         }
+    }
+
+    private data class StepOutcome(
+        val outcome: Type,
+        val result: String? = null,
+        val error: String = "",
+        val friendlyMessage: String = "",
+        val attemptsUsed: Int = 0,
+        val updatedRecovery: RecoveryState = RecoveryState()
+    ) {
+        enum class Type { SUCCESS, SKIPPED, REPLAN, NEEDS_USER, FAIL }
+    }
+
+    /** Execute a single step with up to [recovery.maxAttempts] retries, then escalate. */
+    private suspend fun executeWithRecovery(
+        task: AgentTask,
+        step: TaskStep,
+        request: PlanStepRequest,
+        agent: com.agentos.app.domain.agent.Agent,
+        ctx: StepContext,
+        recovery: RecoveryState,
+        conversationId: String
+    ): StepOutcome {
+        var attempts = 0
+        var lastError: Throwable? = null
+        var currentRecovery = recovery
+        while (attempts <= currentRecovery.maxAttempts) {
+            attempts++
+            try {
+                val resultText = agent.runStep(step.copy(attempt = attempts - 1), task, ctx)
+                return StepOutcome(
+                    outcome = StepOutcome.Type.SUCCESS,
+                    result = resultText,
+                    attemptsUsed = attempts,
+                    updatedRecovery = currentRecovery
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+                val decision = RecoveryClassifier.classify(step, e, attempts - 1)
+                Logger.w("TaskEngine", "Step ${step.id.take(8)} attempt $attempts failed: ${e.message} → ${decision.strategy}")
+                emit(TaskEvent.RecoveryStarted(task.id, step.id, decision.reason, attempts))
+                persistEvent(ChatMessage(
+                    id = UUID.randomUUID().toString(), conversationId = conversationId,
+                    role = MessageRole.EVENT,
+                    text = decision.friendlyMessage,
+                    eventType = EventType.RECOVERY, severity = EventSeverity.WARNING
+                ))
+                when (decision.strategy) {
+                    RecoveryClassifier.Strategy.RETRY_STEP -> {
+                        if (decision.waitMs > 0) delay(decision.waitMs)
+                        // Loop again.
+                        emit(TaskEvent.RecoveryCompleted(task.id, step.id, succeeded = false, note = "retrying (attempt ${attempts + 1})"))
+                        continue
+                    }
+                    RecoveryClassifier.Strategy.RETRY_AFTER_WAIT -> {
+                        delay(decision.waitMs)
+                        emit(TaskEvent.RecoveryCompleted(task.id, step.id, succeeded = false, note = "waited ${decision.waitMs}ms, retrying"))
+                        continue
+                    }
+                    RecoveryClassifier.Strategy.REPLAN -> {
+                        emit(TaskEvent.RecoveryCompleted(task.id, step.id, succeeded = false, note = "escalating to replan"))
+                        return StepOutcome(
+                            outcome = StepOutcome.Type.REPLAN,
+                            error = e.message ?: "replan triggered",
+                            friendlyMessage = decision.friendlyMessage,
+                            attemptsUsed = attempts,
+                            updatedRecovery = currentRecovery.copy(attempts = attempts)
+                        )
+                    }
+                    RecoveryClassifier.Strategy.SKIP_STEP -> {
+                        return StepOutcome(
+                            outcome = StepOutcome.Type.SKIPPED,
+                            error = e.message ?: "skipped",
+                            friendlyMessage = decision.friendlyMessage,
+                            attemptsUsed = attempts,
+                            updatedRecovery = currentRecovery
+                        )
+                    }
+                    RecoveryClassifier.Strategy.NEEDS_USER -> {
+                        return StepOutcome(
+                            outcome = StepOutcome.Type.NEEDS_USER,
+                            error = e.message ?: "needs user",
+                            friendlyMessage = decision.friendlyMessage,
+                            attemptsUsed = attempts,
+                            updatedRecovery = currentRecovery
+                        )
+                    }
+                    RecoveryClassifier.Strategy.FAIL_TASK -> {
+                        return StepOutcome(
+                            outcome = StepOutcome.Type.FAIL,
+                            error = e.message ?: "failed",
+                            friendlyMessage = decision.friendlyMessage,
+                            attemptsUsed = attempts,
+                            updatedRecovery = currentRecovery
+                        )
+                    }
+                }
+            }
+        }
+        // Exhausted retries.
+        return StepOutcome(
+            outcome = StepOutcome.Type.REPLAN,
+            error = lastError?.message ?: "exhausted retries",
+            friendlyMessage = "Step failed after $attempts attempts. Replanning…",
+            attemptsUsed = attempts,
+            updatedRecovery = currentRecovery.copy(attempts = attempts)
+        )
     }
 
     /* ------------------------- helpers ------------------------- */
@@ -343,7 +583,10 @@ class TaskEngine(
         val firstAttempt = mainAgent.plan(
             request, toolRegistry.describeForPlanner(), agentRegistry.catalog(), memoryContext, history, aiCall
         )
-        val parser = PlanParser(agentRegistry.all().map { it.name }.toSet())
+        val parser = PlanParser(
+            agentRegistry.all().map { it.name }.toSet(),
+            toolRegistry.all().map { it.name }.toSet()
+        )
         return try {
             parser.parse(firstAttempt)
             firstAttempt
@@ -356,13 +599,13 @@ class TaskEngine(
         }
     }
 
-    private suspend fun finishTask(task: AgentTask, answer: String, conversationId: String) {
+    private suspend fun finishTask(task: AgentTask, answer: String, conversationId: String, partial: Boolean) {
         if (answer.isBlank()) throw StepFailedException("The AI provider returned an empty answer.")
         persistEvent(ChatMessage(
             id = UUID.randomUUID().toString(), conversationId = conversationId,
             role = MessageRole.ASSISTANT, text = answer
         ))
-        setTaskStatus(task.copy(finalResult = answer), TaskStatus.COMPLETED)
+        setTaskStatus(task.copy(finalResult = answer), if (partial) TaskStatus.PARTIAL else TaskStatus.COMPLETED)
 
         // auto-memory: remember task outcome (real persistence)
         if (settings.privacyFlow.first().autoMemoryEnabled) {
@@ -374,11 +617,42 @@ class TaskEngine(
                 )
             }
         }
-        _events.emit(TaskEvent.Completed(task.id, answer))
+        _events.emit(TaskEvent.Completed(task.id, answer, partial))
+        OverlayController.hide(contextProvider(), task.id)
+    }
+
+    /** Mark the task as PARTIAL with the partial answer synthesized from collected steps. */
+    private suspend fun finishTaskPartial(
+        task: AgentTask,
+        collected: List<Pair<String, String>>,
+        conversationId: String,
+        reason: String
+    ) {
+        // Synthesize a partial answer from what was collected so the user gets a useful response.
+        val transcript = if (collected.isEmpty()) "No steps completed." else collected.joinToString("\n\n") { (t, r) -> "### $t\n$r" }
+        val partialAnswer = "I couldn't complete the full task. Here's what I managed:\n\n$transcript\n\nReason I stopped: $reason"
+        persistEvent(ChatMessage(
+            id = UUID.randomUUID().toString(), conversationId = conversationId,
+            role = MessageRole.ASSISTANT, text = partialAnswer
+        ))
+        setTaskStatus(
+            task.copy(finalResult = partialAnswer, error = reason),
+            TaskStatus.PARTIAL
+        )
+        _events.emit(TaskEvent.Completed(task.id, partialAnswer, partial = true))
+        _events.emit(TaskEvent.Error(task.id, reason, recoverable = true))
+        OverlayController.hide(contextProvider(), task.id)
     }
 
     private suspend fun setTaskStatus(task: AgentTask, status: TaskStatus, error: String? = null) {
-        val updated = task.copy(status = status, error = error ?: task.error, updatedAt = System.currentTimeMillis())
+        val updated = task.copy(
+            status = status, error = error ?: task.error,
+            updatedAt = System.currentTimeMillis(),
+            currentAgent = when (status) {
+                TaskStatus.RUNNING, TaskStatus.RECOVERING, TaskStatus.VERIFYING -> task.currentAgent
+                else -> null
+            }
+        )
         taskRepo.update(updated)
         updateActive(updated)
         _events.emit(TaskEvent.TaskStatusChanged(task.id, status))

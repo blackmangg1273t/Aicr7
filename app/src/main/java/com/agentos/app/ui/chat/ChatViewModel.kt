@@ -29,11 +29,15 @@ import java.util.UUID
 data class PlanStepUi(
     val index: Int,
     val agent: String,
-    val tool: String?,
+ val tool: String?,
     val why: String,
     val status: StepStatus = StepStatus.PENDING,
     val result: String? = null,
-    val error: String? = null
+    val error: String? = null,
+    /** Wall-clock ms when the step started running (real data). */
+    val startedAtMs: Long? = null,
+    /** Wall-clock ms when the step finished (real data). */
+    val finishedAtMs: Long? = null
 )
 
 /** Screenshot / file attachment captured during execution. */
@@ -58,7 +62,11 @@ data class ChatUiState(
     val attachments: List<AttachmentUi> = emptyList(),
     val startedAtMs: Long? = null,         // wall time the task actually began
     val finalStatus: TaskStatus? = null,   // COMPLETED / FAILED / CANCELLED once done
-    val finalResult: String? = null
+    val finalResult: String? = null,
+    /** The most recent user request — used by the friendly error UX to retry. */
+    val lastUserRequest: String? = null,
+    /** True briefly after a recoverable error so the UI can show a recovery hint. */
+    val recovering: Boolean = false
 ) {
     val completedSteps: Int get() = plan.count { it.status == StepStatus.COMPLETED }
     val failedSteps: Boolean get() = plan.any { it.status == StepStatus.FAILED }
@@ -146,26 +154,33 @@ class ChatViewModel(
                 currentActivity = if (ev.plan.directAnswer) "Composing answer…" else null
             )
             is TaskEvent.StepStarted -> {
-                updatePlan(ev.taskId, ev.step.index) { it.copy(status = StepStatus.RUNNING, error = null) }
+                val now = System.currentTimeMillis()
+                updatePlan(ev.taskId, ev.step.index) {
+                    it.copy(status = StepStatus.RUNNING, error = null, startedAtMs = ev.step.startedAt ?: now)
+                }
                 _ui.value = _ui.value.copy(
                     running = true,
                     taskId = ev.taskId,
                     phase = if (_ui.value.phase == ExecutionPhase.PLANNING) ExecutionPhase.EXECUTING else _ui.value.phase,
                     currentAgent = ev.step.agentName,
-                    currentActivity = ev.step.why.ifBlank { ev.step.toolName?.let { t -> "Using $t…" } ?: "Working…" }
+                    currentActivity = ev.step.why.ifBlank { ev.step.toolName?.let { t -> "Using $t…" } ?: "Working…" },
+                    recovering = false
                 )
             }
             is TaskEvent.StepFinished -> {
+                val now = System.currentTimeMillis()
                 updatePlan(ev.taskId, ev.step.index) {
                     it.copy(
                         status = ev.step.status,
                         result = ev.step.result,
-                        error = ev.step.error
+                        error = ev.step.error,
+                        finishedAtMs = ev.step.finishedAt ?: now
                     )
                 }
                 _ui.value = _ui.value.copy(
                     currentAgent = null,
-                    currentActivity = null
+                    currentActivity = null,
+                    recovering = false
                 )
             }
             is TaskEvent.AgentActivity -> _ui.value = _ui.value.copy(currentActivity = ev.activity)
@@ -206,7 +221,8 @@ class ChatViewModel(
                 currentActivity = null,
                 running = if (ev.recoverable) _ui.value.running else false,
                 phase = if (ev.recoverable) _ui.value.phase else ExecutionPhase.DONE,
-                finalStatus = if (ev.recoverable) _ui.value.finalStatus else TaskStatus.FAILED
+                finalStatus = if (ev.recoverable) _ui.value.finalStatus else TaskStatus.FAILED,
+                recovering = ev.recoverable
             )
             is TaskEvent.TaskStatusChanged -> {
                 when (ev.status) {
@@ -219,6 +235,14 @@ class ChatViewModel(
                     else -> Unit
                 }
             }
+            // Recovery / replanning lifecycle events — surfaced via message log,
+            // not directly mapped to UI state (the engine also persists them).
+            is TaskEvent.RecoveryStarted,
+            is TaskEvent.RecoveryCompleted,
+            is TaskEvent.ReplanStarted,
+            is TaskEvent.ReplanCompleted,
+            is TaskEvent.VerificationStarted,
+            is TaskEvent.VerificationCompleted -> Unit
         }
     }
 
@@ -248,7 +272,9 @@ class ChatViewModel(
                 startedAtMs = System.currentTimeMillis(),
                 phase = ExecutionPhase.PLANNING,
                 currentAgent = "Main Agent",
-                currentActivity = "Understanding your request…"
+                currentActivity = "Understanding your request…",
+                lastUserRequest = request,
+                recovering = false
             )
             engine.start(request, convId)
         }
@@ -267,7 +293,21 @@ class ChatViewModel(
     }
 
     fun clearError() {
-        _ui.value = _ui.value.copy(lastError = null)
+        _ui.value = _ui.value.copy(lastError = null, recovering = false)
+    }
+
+    /** Re-send the most recent user request, used by the friendly error UX. */
+    fun retryLast() {
+        val last = _ui.value.lastUserRequest ?: return
+        clearError()
+        send(last)
+    }
+
+    /** Ask the engine to try a different approach for the same request. */
+    fun tryAnotherMethod() {
+        val last = _ui.value.lastUserRequest ?: return
+        clearError()
+        send("Try a different approach to: $last")
     }
 
     fun clearExecution() {

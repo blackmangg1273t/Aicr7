@@ -27,6 +27,7 @@ import com.agentos.app.data.tools.WebFetchTool
 import com.agentos.app.data.tools.WebSearchTool
 import com.agentos.app.ui.agents.AgentsViewModel
 import com.agentos.app.ui.chat.ChatViewModel
+import com.agentos.app.ui.diagnostics.DiagnosticsViewModel
 import com.agentos.app.ui.settings.SettingsViewModel
 import com.agentos.app.ui.tasks.TasksViewModel
 import com.agentos.app.ui.terminal.TerminalViewModel
@@ -120,6 +121,7 @@ val agentsModule = module {
 
     single {
         val registry = get<ToolRegistry>()
+        val browserEngine = get<BrowserEngine>()
         val toolCtx = ToolContext(
             appContext = androidContext(),
             onActivity = { /* agents wire their own activity callbacks per step */ },
@@ -129,7 +131,7 @@ val agentsModule = module {
             listOf(
                 get<MainAgent>(),
                 ResearchAgent(registry, toolCtx),
-                BrowserAgent(registry, toolCtx),
+                BrowserAgent(registry, toolCtx, browserEngine),
                 AndroidAgent(registry, toolCtx),
                 TerminalAgent(registry, toolCtx),
                 CodingAgent(registry, toolCtx)
@@ -151,6 +153,7 @@ val agentsModule = module {
             networkMonitor = get()
         ).apply {
             contextProvider = { androidContext() }
+            screenshotRequester = { ScreenCaptureCoordinator.requestScreenshot(androidContext()) }
         }
     }
 }
@@ -167,4 +170,5 @@ val uiModule = module {
     viewModelOf(::TerminalViewModel)
     viewModelOf(::SettingsViewModel)
     viewModelOf(::AgentsViewModel)
+    viewModelOf(::DiagnosticsViewModel)
 }

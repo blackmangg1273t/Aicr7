@@ -1,13 +1,12 @@
 package com.agentos.app.ui.tasks
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,25 +17,20 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.History
-import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -46,483 +40,619 @@ import com.agentos.app.domain.model.StepStatus
 import com.agentos.app.domain.model.TaskStatus
 import com.agentos.app.ui.components.AgentBadge
 import com.agentos.app.ui.components.AuraCard
-import com.agentos.app.ui.components.DotState
-import com.agentos.app.ui.components.GradientProgressBar
-import com.agentos.app.ui.components.StatusDot
 import com.agentos.app.ui.components.toolDisplayName
+import com.agentos.app.ui.theme.AgentOsColors
 import com.agentos.app.ui.theme.MonoStyle
-import com.agentos.app.ui.theme.OsMotion
 import com.agentos.app.ui.theme.OsShapes
 import com.agentos.app.ui.theme.osColors
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /* ------------------------------------------------------------------ */
-/* Tasks — live overview + history with filtering                       */
+/* Tasks — 2026 redesign: status-grouped list with inline expansion      */
+/*                                                                       */
+/*  • Three sections: Running / Completed / Failed                       */
+/*  • Each card shows: status icon, title, label, duration, step chip,   */
+/*    current agent badge (while running), and an [Open] pill button      */
+/*  • Tap Open to expand inline — plan steps, live activity,            */
+/*    verification status, final result/error                            */
+/*  • Failed / Cancelled / Interrupted tasks show a gradient Resume      */
+/*    button that re-launches the original request through the engine    */
 /* ------------------------------------------------------------------ */
 
-private enum class TaskFilter(val label: String) {
-    ALL("All"), ACTIVE("Running"), DONE("Completed"), FAILED("Failed")
+/** Electric blue / violet accents — the 2026 AgentOS palette. */
+private val ElectricBlue = Color(0xFF4F8AFF)
+private val ElectricViolet = Color(0xFF8B5CF6)
+
+/** Section membership — matches the redesigned TaskStatus enum. */
+private val RUNNING_STATUSES = setOf(
+    TaskStatus.PENDING, TaskStatus.PLANNING, TaskStatus.PLAN_READY,
+    TaskStatus.RUNNING, TaskStatus.WAITING_USER, TaskStatus.RECOVERING,
+    TaskStatus.REPLANNING, TaskStatus.VERIFYING
+)
+private val COMPLETED_STATUSES = setOf(TaskStatus.COMPLETED, TaskStatus.PARTIAL)
+private val FAILED_STATUSES = setOf(TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED)
+
+private fun parseStatus(task: TaskEntity): TaskStatus =
+    runCatching { TaskStatus.valueOf(task.status) }.getOrDefault(TaskStatus.PENDING)
+
+/** Unicode status glyph per the spec: ✓ ● ○ ✕ ⏸ ↻ ⟳ ⊕. */
+private fun statusIcon(status: TaskStatus): String = when (status) {
+    TaskStatus.PENDING -> "○"
+    TaskStatus.PLANNING, TaskStatus.PLAN_READY, TaskStatus.RUNNING -> "●"
+    TaskStatus.WAITING_USER -> "⏸"
+    TaskStatus.RECOVERING -> "↻"
+    TaskStatus.REPLANNING -> "⟳"
+    TaskStatus.VERIFYING -> "⊕"
+    TaskStatus.COMPLETED, TaskStatus.PARTIAL -> "✓"
+    TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED -> "✕"
 }
 
-private fun TaskEntity.isActive() =
-    status in setOf(TaskStatus.PENDING.name, TaskStatus.PLANNING.name, TaskStatus.RUNNING.name, TaskStatus.WAITING_USER.name)
+/** Human label per the spec ("Running", "Completed", "Needs attention", …). */
+private fun statusLabel(status: TaskStatus): String = when (status) {
+    TaskStatus.PENDING -> "Pending"
+    TaskStatus.PLANNING -> "Planning"
+    TaskStatus.PLAN_READY -> "Plan ready"
+    TaskStatus.RUNNING -> "Running"
+    TaskStatus.WAITING_USER -> "Waiting for you"
+    TaskStatus.RECOVERING -> "Recovering"
+    TaskStatus.REPLANNING -> "Replanning"
+    TaskStatus.VERIFYING -> "Verifying"
+    TaskStatus.COMPLETED -> "Completed"
+    TaskStatus.PARTIAL -> "Partial"
+    TaskStatus.FAILED -> "Needs attention"
+    TaskStatus.CANCELLED -> "Cancelled"
+    TaskStatus.INTERRUPTED -> "Interrupted"
+}
+
+/** Accent color used for the icon and label, keyed by status family. */
+private fun statusAccent(status: TaskStatus, c: AgentOsColors): Color = when (status) {
+    TaskStatus.COMPLETED, TaskStatus.PARTIAL -> c.success
+    TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED -> c.error
+    TaskStatus.WAITING_USER -> c.warning
+    TaskStatus.RECOVERING, TaskStatus.REPLANNING, TaskStatus.VERIFYING -> ElectricViolet
+    TaskStatus.PENDING -> c.textMuted
+    else -> ElectricBlue // PLANNING, PLAN_READY, RUNNING
+}
 
 @Composable
 fun TasksScreen(
     tasks: List<TaskEntity>,
     selectedTask: TaskEntity?,
     selectedSteps: List<TaskStepEntity>,
-    onSelect: (String?) -> Unit
+    onSelect: (String?) -> Unit,
+    onResume: (String) -> Unit = {},
+    allSteps: Map<String, List<TaskStepEntity>> = emptyMap()
 ) {
-    if (selectedTask == null) TaskList(tasks, onSelect) else TaskDetail(selectedTask, selectedSteps) { onSelect(null) }
-}
-
-@Composable
-private fun TaskList(tasks: List<TaskEntity>, onSelect: (String?) -> Unit) {
     val c = osColors()
-    var filter by remember { mutableStateOf(TaskFilter.ALL) }
 
-    val filtered = remember(tasks, filter) {
-        when (filter) {
-            TaskFilter.ALL -> tasks
-            TaskFilter.ACTIVE -> tasks.filter { it.isActive() }
-            TaskFilter.DONE -> tasks.filter { it.status == TaskStatus.COMPLETED.name }
-            TaskFilter.FAILED -> tasks.filter { it.status == TaskStatus.FAILED.name || it.status == TaskStatus.CANCELLED.name }
-        }
-    }
-    val active = tasks.filter { it.isActive() }
-    val recent = filtered.filterNot { it.isActive() }
-
-    Column(Modifier.fillMaxSize()) {
-        // header
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Tasks", style = MaterialTheme.typography.headlineSmall, color = c.textPrimary, modifier = Modifier.weight(1f))
-            if (active.isNotEmpty()) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(7.dp),
-                    modifier = Modifier
-                        .clip(OsShapes.pill)
-                        .background(c.accent.copy(alpha = 0.10f))
-                        .border(1.dp, c.accent.copy(alpha = 0.3f), OsShapes.pill)
-                        .padding(horizontal = 10.dp, vertical = 5.dp)
-                ) {
-                    StatusDot(DotState.RUNNING, size = 5f)
-                    Text("${active.size} running", style = MaterialTheme.typography.labelMedium, color = c.accent)
-                }
-            }
-        }
-
-        // filter chips
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            TaskFilter.entries.forEach { f ->
-                val selected = filter == f
-                val bg by animateColorAsState(
-                    if (selected) c.accent.copy(alpha = 0.16f) else c.surfaceHigh,
-                    tween(OsMotion.Fast), label = "chipBg"
-                )
-                Text(
-                    f.label,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (selected) c.accent else c.textSecondary,
-                    modifier = Modifier
-                        .clip(OsShapes.pill)
-                        .background(bg)
-                        .border(1.dp, if (selected) c.accent.copy(alpha = 0.35f) else c.border, OsShapes.pill)
-                        .clickable { filter = f }
-                        .padding(horizontal = 14.dp, vertical = 7.dp)
-                )
-            }
-        }
-
-        if (filtered.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(bottom = 40.dp), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        Icons.Rounded.History,
-                        contentDescription = null,
-                        tint = c.textMuted,
-                        modifier = Modifier.size(30.dp).alpha(0.7f)
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        "No tasks yet.\nAsk AgentOS to do something in Chat.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = c.textMuted,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                    )
-                }
-            }
-            return
-        }
-
-        LazyColumn(
-            Modifier.fillMaxSize(),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            if (active.isNotEmpty() && filter != TaskFilter.DONE && filter != TaskFilter.FAILED) {
-                item { SectionLabel("Running") }
-                items(active, key = { it.id }) { TaskRow(it, onSelect, active = true) }
-            }
-            if (recent.isNotEmpty()) {
-                item { SectionLabel(if (filter == TaskFilter.ALL) "Recent" else "") }
-                items(recent, key = { it.id }) { TaskRow(it, onSelect, active = false) }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SectionLabel(text: String) {
-    val c = osColors()
-    if (text.isNotBlank()) {
-        Text(
-            text,
-            style = MaterialTheme.typography.labelMedium,
-            color = c.textMuted,
-            modifier = Modifier.padding(start = 4.dp, bottom = 2.dp)
+    val grouped = remember(tasks) {
+        Triple(
+            tasks.filter { parseStatus(it) in RUNNING_STATUSES },
+            tasks.filter { parseStatus(it) in COMPLETED_STATUSES },
+            tasks.filter { parseStatus(it) in FAILED_STATUSES }
         )
     }
-}
-
-@Composable
-private fun TaskRow(task: TaskEntity, onSelect: (String?) -> Unit, active: Boolean) {
-    val c = osColors()
-    val status = task.status
-    val dot = when (status) {
-        TaskStatus.COMPLETED.name -> DotState.DONE
-        TaskStatus.FAILED.name -> DotState.ERROR
-        TaskStatus.CANCELLED.name -> DotState.IDLE
-        TaskStatus.WAITING_USER.name -> DotState.WAITING
-        else -> DotState.RUNNING
-    }
-    if (active) {
-        AuraCard(Modifier.fillMaxWidth().clickable { onSelect(task.id) }, active = true) {
-            Row(Modifier.padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
-                StatusDot(dot)
-                Spacer(Modifier.width(11.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        task.userRequest,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = c.textPrimary,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(Modifier.height(3.dp))
-                    Text(
-                        when (status) {
-                            TaskStatus.PLANNING.name -> "Planning…"
-                            TaskStatus.WAITING_USER.name -> "Waiting for you"
-                            else -> "Working… · started ${relativeTime(task.createdAt)}"
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = c.accent
-                    )
-                }
-                Text("✦", color = c.accent, style = MaterialTheme.typography.titleMedium)
-            }
-        }
-    } else {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clip(OsShapes.cardSmall)
-                .background(c.surfaceHigh)
-                .clickable { onSelect(task.id) }
-                .padding(horizontal = 15.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            StatusDot(dot, size = 6f)
-            Spacer(Modifier.width(11.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    task.userRequest,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = c.textPrimary,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    "${relativeTime(task.updatedAt)} · ${formatDuration(task.updatedAt - task.createdAt)}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = c.textMuted
-                )
-            }
-            Text(
-                when (status) {
-                    TaskStatus.COMPLETED.name -> "✓"
-                    TaskStatus.FAILED.name -> "✕"
-                    TaskStatus.CANCELLED.name -> "—"
-                    else -> "●"
-                },
-                color = when (status) {
-                    TaskStatus.COMPLETED.name -> c.success
-                    TaskStatus.FAILED.name -> c.error
-                    else -> c.textMuted
-                },
-                style = MaterialTheme.typography.titleSmall
-            )
-        }
-    }
-}
-
-/* ---------------------------- task detail ---------------------------- */
-
-@Composable
-private fun TaskDetail(task: TaskEntity, steps: List<TaskStepEntity>, onBack: () -> Unit) {
-    val c = osColors()
-    val dot = when (task.status) {
-        TaskStatus.COMPLETED.name -> DotState.DONE
-        TaskStatus.FAILED.name -> DotState.ERROR
-        TaskStatus.CANCELLED.name -> DotState.IDLE
-        TaskStatus.WAITING_USER.name -> DotState.WAITING
-        else -> DotState.RUNNING
-    }
-    val isActive = task.isActive()
-    val doneCount = steps.count { it.status == StepStatus.COMPLETED.name }
-    val failedCount = steps.count { it.status == StepStatus.FAILED.name }
+    val (running, completed, failed) = grouped
 
     LazyColumn(
         Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        contentPadding = PaddingValues(bottom = 24.dp)
     ) {
+        // Title bar + live running count
         item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.AutoMirrored.Rounded.ArrowBack,
-                    contentDescription = "Back",
-                    tint = c.accent,
-                    modifier = Modifier
-                        .clip(OsShapes.pill)
-                        .clickable { onBack() }
-                        .padding(horizontal = 8.dp, vertical = 6.dp)
-                        .size(20.dp)
-                )
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    "Back",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = c.accent,
-                    modifier = Modifier
-                        .clip(OsShapes.pill)
-                        .clickable { onBack() }
-                        .padding(horizontal = 2.dp, vertical = 6.dp)
+                    "Tasks",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = c.textPrimary,
+                    modifier = Modifier.weight(1f)
                 )
-            }
-        }
-        item {
-            Column {
-                Text(task.userRequest, style = MaterialTheme.typography.headlineSmall, color = c.textPrimary)
-                Spacer(Modifier.height(10.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    // status chip
+                if (running.isNotEmpty()) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier
                             .clip(OsShapes.pill)
-                            .background(c.surfaceHigh)
-                            .border(1.dp, c.border, OsShapes.pill)
+                            .background(ElectricBlue.copy(alpha = 0.12f))
+                            .border(1.dp, ElectricBlue.copy(alpha = 0.35f), OsShapes.pill)
                             .padding(horizontal = 10.dp, vertical = 5.dp)
                     ) {
-                        StatusDot(dot, size = 5f)
+                        Box(Modifier.size(6.dp).clip(OsShapes.pill).background(ElectricBlue))
                         Text(
-                            when (task.status) {
-                                TaskStatus.PLANNING.name -> "Planning"
-                                TaskStatus.RUNNING.name -> "Working"
-                                TaskStatus.WAITING_USER.name -> "Waiting for you"
-                                TaskStatus.COMPLETED.name -> "Completed"
-                                TaskStatus.FAILED.name -> "Needs attention"
-                                TaskStatus.CANCELLED.name -> "Cancelled"
-                                else -> "Ready"
-                            },
+                            "${running.size} running",
                             style = MaterialTheme.typography.labelMedium,
-                            color = c.textSecondary
+                            color = ElectricBlue
                         )
                     }
-                    // duration chip (real)
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        modifier = Modifier
-                            .clip(OsShapes.pill)
-                            .background(c.surfaceHigh)
-                            .border(1.dp, c.border, OsShapes.pill)
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                    ) {
+                }
+            }
+        }
+
+        if (tasks.isEmpty()) {
+            item {
+                Box(
+                    Modifier.fillMaxWidth().padding(top = 80.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(
-                            Icons.Rounded.Schedule,
+                            Icons.Rounded.History,
                             contentDescription = null,
                             tint = c.textMuted,
-                            modifier = Modifier.size(11.dp)
+                            modifier = Modifier.size(30.dp).alpha(0.7f)
                         )
+                        Spacer(Modifier.height(10.dp))
                         Text(
-                            formatDuration(task.updatedAt - task.createdAt),
+                            "No tasks yet.\nAsk AgentOS to do something in Chat.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = c.textMuted,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+        }
+
+        if (running.isNotEmpty()) {
+            item { SectionHeader("Running", running.size, ElectricBlue) }
+            items(running, key = { it.id }) { task ->
+                TaskCard(
+                    task = task,
+                    steps = stepsFor(task, selectedTask, selectedSteps, allSteps),
+                    expanded = selectedTask?.id == task.id,
+                    onToggle = { onSelect(if (selectedTask?.id == task.id) null else task.id) },
+                    onResume = { onResume(task.id) }
+                )
+            }
+        }
+
+        if (completed.isNotEmpty()) {
+            item { SectionHeader("Completed", completed.size, c.success) }
+            items(completed, key = { it.id }) { task ->
+                TaskCard(
+                    task = task,
+                    steps = stepsFor(task, selectedTask, selectedSteps, allSteps),
+                    expanded = selectedTask?.id == task.id,
+                    onToggle = { onSelect(if (selectedTask?.id == task.id) null else task.id) },
+                    onResume = { onResume(task.id) }
+                )
+            }
+        }
+
+        if (failed.isNotEmpty()) {
+            item { SectionHeader("Failed", failed.size, c.error) }
+            items(failed, key = { it.id }) { task ->
+                TaskCard(
+                    task = task,
+                    steps = stepsFor(task, selectedTask, selectedSteps, allSteps),
+                    expanded = selectedTask?.id == task.id,
+                    onToggle = { onSelect(if (selectedTask?.id == task.id) null else task.id) },
+                    onResume = { onResume(task.id) }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Resolves the steps to render for a card. For the currently-selected (expanded)
+ * task we prefer the dedicated [selectedSteps] flow — it's the source of truth
+ * for live step updates. For other (collapsed) cards we use the [allSteps] map
+ * so the "Step X/Y" chip and current-agent badge can render before expansion.
+ */
+private fun stepsFor(
+    task: TaskEntity,
+    selectedTask: TaskEntity?,
+    selectedSteps: List<TaskStepEntity>,
+    allSteps: Map<String, List<TaskStepEntity>>
+): List<TaskStepEntity> =
+    if (selectedTask?.id == task.id) selectedSteps else allSteps[task.id] ?: emptyList()
+
+/* ---------------------------- section header ---------------------------- */
+
+@Composable
+private fun SectionHeader(title: String, count: Int, color: Color) {
+    val c = osColors()
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Box(Modifier.size(8.dp).clip(OsShapes.pill).background(color))
+        Text(title, style = MaterialTheme.typography.labelLarge, color = c.textPrimary)
+        Text("· $count", style = MaterialTheme.typography.labelSmall, color = c.textMuted)
+    }
+}
+
+/* ------------------------------ task card ------------------------------ */
+
+@Composable
+private fun TaskCard(
+    task: TaskEntity,
+    steps: List<TaskStepEntity>,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onResume: () -> Unit
+) {
+    val c = osColors()
+    val status = parseStatus(task)
+    val isRunning = status in RUNNING_STATUSES
+    val isFailed = status in FAILED_STATUSES
+    val accent = statusAccent(status, c)
+    val icon = statusIcon(status)
+    val label = statusLabel(status)
+
+    val runningStep = steps.firstOrNull { it.status == StepStatus.RUNNING.name }
+    val currentAgent = runningStep?.agentName
+        ?: if (isRunning) steps.lastOrNull()?.agentName else null
+    val doneCount = steps.count {
+        it.status == StepStatus.COMPLETED.name || it.status == StepStatus.VERIFIED.name
+    }
+    val totalCount = steps.size
+
+    AuraCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .clickable { onToggle() },
+        active = isRunning
+    ) {
+        Column(Modifier.padding(15.dp)) {
+            // Row 1: status icon + title + step chip + Open pill
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(icon, color = accent, style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        task.userRequest,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = c.textPrimary,
+                        maxLines = if (expanded) 3 else 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(label, style = MaterialTheme.typography.labelSmall, color = accent)
+                        if (task.updatedAt > task.createdAt) {
+                            Text(
+                                " · ${formatDuration(task.updatedAt - task.createdAt)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = c.textMuted
+                            )
+                        }
+                    }
+                }
+                if (totalCount > 0) {
+                    Box(
+                        Modifier
+                            .clip(OsShapes.pill)
+                            .background(c.surfaceInteractive)
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            "Step $doneCount/$totalCount",
                             style = MonoStyle.copy(fontSize = 10.sp),
                             color = c.textSecondary
                         )
                     }
-                    Text(
-                        relativeTime(task.createdAt),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = c.textMuted
-                    )
+                    Spacer(Modifier.width(8.dp))
                 }
-            }
-        }
-        // live progress for running tasks / final progress for done ones
-        if (steps.isNotEmpty()) {
-            item {
-                Column {
-                    GradientProgressBar(
-                        progress = if (steps.isEmpty()) 0f else doneCount.toFloat() / steps.size,
-                        error = task.status == TaskStatus.FAILED.name
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "$doneCount of ${steps.size} steps completed" +
-                            if (failedCount > 0) " · $failedCount failed" else "",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = c.textMuted,
-                        modifier = Modifier.padding(start = 2.dp)
-                    )
-                }
-            }
-        }
-        task.error?.let { err ->
-            item {
-                Column(
-                    Modifier.fillMaxWidth().clip(OsShapes.cardSmall).background(c.errorContainer).padding(14.dp)
-                ) {
-                    Text("Reason", style = MaterialTheme.typography.labelMedium, color = c.error)
-                    Spacer(Modifier.height(3.dp))
-                    Text(err, style = MaterialTheme.typography.bodySmall, color = c.textPrimary)
-                }
-            }
-        }
-        if (steps.isNotEmpty()) {
-            item { Text("Plan & execution", style = MaterialTheme.typography.titleMedium, color = c.textPrimary) }
-            items(steps, key = { it.id }) { step ->
-                DetailStepCard(step)
-            }
-        }
-        task.finalResult?.let { result ->
-            item { Text("Result", style = MaterialTheme.typography.titleMedium, color = c.textPrimary) }
-            item {
-                Column(
+                Box(
                     Modifier
-                        .fillMaxWidth()
-                        .clip(OsShapes.card)
-                        .background(
-                            if (task.status == TaskStatus.COMPLETED.name) c.successContainer else c.surfaceHigh
+                        .clip(OsShapes.pill)
+                        .background(if (expanded) c.surfaceInteractive else ElectricBlue.copy(alpha = 0.14f))
+                        .border(
+                            1.dp,
+                            if (expanded) c.border else ElectricBlue.copy(alpha = 0.35f),
+                            OsShapes.pill
                         )
-                        .border(1.dp, c.border, OsShapes.card)
-                        .padding(15.dp)
+                        .clickable { onToggle() }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
                 ) {
-                    Text(result, style = MaterialTheme.typography.bodyMedium, color = c.textPrimary)
+                    Text(
+                        if (expanded) "Close" else "Open",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (expanded) c.textSecondary else ElectricBlue
+                    )
+                }
+            }
+
+            // Current agent badge (only while a step is actually running)
+            if (isRunning && currentAgent != null) {
+                Spacer(Modifier.height(10.dp))
+                AgentBadge(currentAgent, live = true)
+            }
+
+            // Inline expansion — full plan, activity, verification, result
+            if (expanded) {
+                Spacer(Modifier.height(14.dp))
+                ExpandedDetail(task, steps, status, onResume)
+            } else if (isFailed) {
+                // A subtle "Resume available" hint on collapsed failed cards
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("↻", color = ElectricViolet, style = MaterialTheme.typography.labelSmall)
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "Tap to resume",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = ElectricViolet
+                    )
                 }
             }
         }
     }
 }
 
-/** Detail step card with agent/tool meta and full result/error text. */
+/* --------------------------- expanded detail --------------------------- */
+
 @Composable
-private fun DetailStepCard(step: TaskStepEntity) {
+private fun ExpandedDetail(
+    task: TaskEntity,
+    steps: List<TaskStepEntity>,
+    status: TaskStatus,
+    onResume: () -> Unit
+) {
+    val c = osColors()
+    Column {
+        // Resume button — only for failed / cancelled / interrupted tasks
+        if (status in FAILED_STATUSES) {
+            ResumeButton(onResume)
+            Spacer(Modifier.height(12.dp))
+        }
+
+        // Current agent — explicit badge while the task is in a running family
+        val runningStep = steps.firstOrNull { it.status == StepStatus.RUNNING.name }
+        val activeAgent = runningStep?.agentName
+            ?: if (status in RUNNING_STATUSES) steps.lastOrNull()?.agentName else null
+        if (activeAgent != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "Current agent",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = c.textMuted
+                )
+                AgentBadge(activeAgent, live = status in RUNNING_STATUSES)
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+
+        // Live activity (or last finished step while between steps)
+        if (runningStep != null) {
+            LiveActivityRow(runningStep, dimmed = false)
+            Spacer(Modifier.height(12.dp))
+        } else if (status in RUNNING_STATUSES && steps.isNotEmpty()) {
+            steps.lastOrNull()?.let {
+                LiveActivityRow(it, dimmed = true)
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+
+        // Verification status
+        val verifiedCount = steps.count { it.status == StepStatus.VERIFIED.name }
+        if (status == TaskStatus.VERIFYING) {
+            VerificationRow(inProgress = true, count = verifiedCount)
+            Spacer(Modifier.height(12.dp))
+        } else if (verifiedCount > 0) {
+            VerificationRow(inProgress = false, count = verifiedCount)
+            Spacer(Modifier.height(12.dp))
+        }
+
+        // Plan steps with status icons
+        if (steps.isNotEmpty()) {
+            Text("Plan", style = MaterialTheme.typography.titleSmall, color = c.textPrimary)
+            Spacer(Modifier.height(6.dp))
+            steps.forEach { step ->
+                StepRow(step)
+                Spacer(Modifier.height(6.dp))
+            }
+        }
+
+        // Error block
+        task.error?.let { err ->
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(OsShapes.cardSmall)
+                    .background(c.errorContainer)
+                    .padding(12.dp)
+            ) {
+                Text("Reason", style = MaterialTheme.typography.labelMedium, color = c.error)
+                Spacer(Modifier.height(3.dp))
+                Text(err, style = MaterialTheme.typography.bodySmall, color = c.textPrimary)
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
+        // Final result
+        task.finalResult?.let { result ->
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(OsShapes.cardSmall)
+                    .background(if (status in COMPLETED_STATUSES) c.successContainer else c.surfaceHigh)
+                    .border(1.dp, c.border, OsShapes.cardSmall)
+                    .padding(12.dp)
+            ) {
+                Text(
+                    "Result",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (status in COMPLETED_STATUSES) c.success else c.textSecondary
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(result, style = MaterialTheme.typography.bodyMedium, color = c.textPrimary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ResumeButton(onResume: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(OsShapes.pill)
+            .background(Brush.linearGradient(listOf(ElectricBlue, ElectricViolet)))
+            .clickable { onResume() }
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("↻", color = Color.White, style = MaterialTheme.typography.titleSmall)
+        Spacer(Modifier.width(8.dp))
+        Text("Resume task", color = Color.White, style = MaterialTheme.typography.labelLarge)
+    }
+}
+
+@Composable
+private fun LiveActivityRow(step: TaskStepEntity, dimmed: Boolean) {
+    val c = osColors()
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(OsShapes.cardSmall)
+            .background(c.surfaceInteractive)
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            if (dimmed) "○" else "●",
+            color = if (dimmed) c.textMuted else ElectricBlue,
+            style = MaterialTheme.typography.labelMedium
+        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                step.why,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (dimmed) c.textSecondary else c.textPrimary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "${step.agentName.replaceFirstChar { it.uppercase() }} Agent · ${
+                    step.toolName?.let { toolDisplayName(it) } ?: "thinking"
+                }",
+                style = MonoStyle.copy(fontSize = 10.sp),
+                color = c.textMuted
+            )
+        }
+    }
+}
+
+@Composable
+private fun VerificationRow(inProgress: Boolean, count: Int) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(OsShapes.cardSmall)
+            .background(ElectricViolet.copy(alpha = 0.10f))
+            .border(1.dp, ElectricViolet.copy(alpha = 0.3f), OsShapes.cardSmall)
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            if (inProgress) "⊕" else "✓",
+            color = ElectricViolet,
+            style = MaterialTheme.typography.titleSmall
+        )
+        Text(
+            when {
+                inProgress -> "Verifying results…"
+                count > 1 -> "$count steps verified"
+                else -> "Verified"
+            },
+            style = MaterialTheme.typography.labelMedium,
+            color = ElectricViolet
+        )
+        Spacer(Modifier.weight(1f))
+        // subtle outline marker so the row sits well next to other blocks
+        Box(Modifier.size(6.dp).clip(OsShapes.pill).background(ElectricViolet.copy(alpha = 0.5f)))
+    }
+}
+
+@Composable
+private fun StepRow(step: TaskStepEntity) {
     val c = osColors()
     val mark = when (step.status) {
         StepStatus.COMPLETED.name -> "✓"
-        StepStatus.RUNNING.name -> "◉"
+        StepStatus.VERIFIED.name -> "✓"
+        StepStatus.RUNNING.name -> "●"
         StepStatus.FAILED.name -> "✕"
         StepStatus.AWAITING_APPROVAL.name -> "⏸"
+        StepStatus.RECOVERING.name -> "↻"
         StepStatus.SKIPPED.name -> "—"
         else -> "○"
     }
     val markColor = when (step.status) {
-        StepStatus.COMPLETED.name -> c.success
-        StepStatus.RUNNING.name -> c.accent
+        StepStatus.COMPLETED.name, StepStatus.VERIFIED.name -> c.success
+        StepStatus.RUNNING.name -> ElectricBlue
         StepStatus.FAILED.name -> c.error
         StepStatus.AWAITING_APPROVAL.name -> c.warning
+        StepStatus.RECOVERING.name -> ElectricViolet
+        StepStatus.SKIPPED.name -> c.textMuted
         else -> c.textMuted
     }
-    var expanded by rememberSaveable(step.id) { mutableStateOf(false) }
-    val hasDetail = step.result != null || step.error != null
-    Column(
+    Row(
         Modifier
             .fillMaxWidth()
             .clip(OsShapes.cardSmall)
             .background(c.surfaceHigh)
-            .clickable(enabled = hasDetail) { expanded = !expanded }
-            .padding(13.dp)
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            Text(mark, color = markColor, style = MaterialTheme.typography.titleSmall)
-            Column(Modifier.weight(1f)) {
-                Text(step.why, style = MaterialTheme.typography.bodyMedium, color = c.textPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(mark, color = markColor, style = MaterialTheme.typography.titleSmall)
+        Column(Modifier.weight(1f)) {
+            Text(
+                step.why,
+                style = MaterialTheme.typography.bodySmall,
+                color = c.textPrimary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "${step.agentName.replaceFirstChar { it.uppercase() }} Agent" +
+                    (step.toolName?.let { " · ${toolDisplayName(it)} ($it)" } ?: ""),
+                style = MonoStyle.copy(fontSize = 10.sp),
+                color = c.textMuted
+            )
+            step.result?.let { r ->
+                Spacer(Modifier.height(4.dp))
                 Text(
-                    "${step.agentName.replaceFirstChar { it.uppercase() }} Agent" +
-                        (step.toolName?.let { " · ${toolDisplayName(it)} ($it)" } ?: ""),
-                    style = MonoStyle,
-                    color = c.textMuted
+                    "↳ ${r.take(160)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = c.textSecondary,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-        }
-        step.result?.let { r ->
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "↳ ${r.take(if (expanded) 2000 else 160)}",
-                style = MaterialTheme.typography.bodySmall.copy(fontFamily = if (expanded) FontFamily.Monospace else FontFamily.Default),
-                color = c.textSecondary,
-                maxLines = if (expanded) 12 else 3,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        step.error?.let { e ->
-            Spacer(Modifier.height(6.dp))
-            Text(
-                e.take(if (expanded) 2000 else 160),
-                style = MaterialTheme.typography.bodySmall,
-                color = c.error,
-                maxLines = if (expanded) 12 else 3,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        if (hasDetail) {
-            Text(
-                if (expanded) "Show less" else "Show more",
-                style = MaterialTheme.typography.labelSmall,
-                color = c.accent,
-                modifier = Modifier.padding(top = 4.dp)
-            )
+            step.error?.let { e ->
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    e.take(200),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = c.error,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
     }
 }
 
 /* ------------------------------ helpers ------------------------------ */
-
-private fun relativeTime(ts: Long): String {
-    val diff = System.currentTimeMillis() - ts
-    return when {
-        diff < 45_000 -> "just now"
-        diff < 3_600_000 -> "${TimeUnit.MILLISECONDS.toMinutes(diff)}m ago"
-        diff < 86_400_000 -> "${TimeUnit.MILLISECONDS.toHours(diff)}h ago"
-        diff < 7 * 86_400_000 -> "${TimeUnit.MILLISECONDS.toDays(diff)}d ago"
-        else -> SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(ts))
-    }
-}
 
 internal fun formatDuration(ms: Long): String {
     if (ms <= 0) return "—"
@@ -533,6 +663,3 @@ internal fun formatDuration(ms: Long): String {
         else -> "${TimeUnit.MILLISECONDS.toHours(ms)}h ${(s % 3600) / 60}m"
     }
 }
-
-private fun formatTime(ts: Long): String =
-    SimpleDateFormat("MMM d · HH:mm", Locale.getDefault()).format(Date(ts))

@@ -125,6 +125,10 @@ interface MessageDao {
 
     @Query("SELECT COUNT(*) FROM messages")
     suspend fun count(): Int
+
+    /** Most recent events of a given eventType (e.g. "ERROR", "RECOVERY"), newest first. */
+    @Query("SELECT * FROM messages WHERE eventType = :eventType ORDER BY timestamp DESC LIMIT :limit")
+    suspend fun recentByEventType(eventType: String, limit: Int = 1): List<MessageEntity>
 }
 
 @Dao
@@ -146,6 +150,14 @@ interface TaskDao {
 
     @Query("SELECT * FROM tasks ORDER BY createdAt DESC")
     fun observeAll(): Flow<List<TaskEntity>>
+
+    /** Returns all tasks in any of the given statuses — used for process-death recovery. */
+    @Query("SELECT * FROM tasks WHERE status IN (:statuses)")
+    suspend fun byStatuses(statuses: List<String>): List<TaskEntity>
+
+    /** Bulk-updates the status of tasks in the given set to a new status — used at startup to mark orphans. */
+    @Query("UPDATE tasks SET status = :newStatus, error = :error, updatedAt = :now WHERE status IN (:oldStatuses)")
+    suspend fun bulkUpdateStatus(oldStatuses: List<String>, newStatus: String, error: String, now: Long): Int
 
     @Query("DELETE FROM tasks")
     suspend fun clearAll()

@@ -1,15 +1,19 @@
 package com.agentos.app.ui.chat
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,10 +27,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -35,7 +36,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Terminal
-import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -52,20 +52,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.agentos.app.data.db.MessageEntity
 import com.agentos.app.domain.model.EventType
 import com.agentos.app.domain.model.MessageRole
-import com.agentos.app.domain.model.TaskStatus
-import com.agentos.app.ui.components.AgentBadge
-import com.agentos.app.ui.components.DotState
 import com.agentos.app.ui.components.MarkdownText
 import com.agentos.app.ui.components.SuggestionCard
-import com.agentos.app.ui.components.StatusDot
 import com.agentos.app.ui.components.rememberConfirmHaptics
 import com.agentos.app.ui.components.toolDisplayName
 import com.agentos.app.ui.components.toolHumanSummary
@@ -84,7 +85,9 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /* ------------------------------------------------------------------ */
-/* Chat — premium agent workspace                                       */
+/* Chat — 2026 premium dark AI-native workspace.                       */
+/* Compact messages, agent header with restrained running aura,         */
+/* task plan + execution timeline as the visualization (no raw logs).   */
 /* ------------------------------------------------------------------ */
 
 @Composable
@@ -99,8 +102,6 @@ fun ChatScreen(
     var input by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
 
-    // smart auto-scroll: follow the stream only when the user is near the bottom,
-    // so reading history is never hijacked.
     val nearBottom by remember {
         derivedStateOf {
             val info = listState.layoutInfo
@@ -108,7 +109,7 @@ fun ChatScreen(
             info.totalItemsCount <= 0 || last >= info.totalItemsCount - 2
         }
     }
-    LaunchedEffect(messages.size, uiState.streamingAnswer?.length, uiState.attachments.size) {
+    LaunchedEffect(messages.size, uiState.streamingAnswer?.length, uiState.attachments.size, uiState.plan.size) {
         if (nearBottom) {
             val target = (messages.size - 1 + (if (uiState.streamingAnswer != null) 1 else 0))
                 .coerceAtLeast(0)
@@ -116,21 +117,20 @@ fun ChatScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().background(c.bg)) {
+        AmbientBackdrop(Modifier.fillMaxSize())
+
         Column(Modifier.fillMaxSize()) {
-            // global task indicator (appears while the agent works)
-            AnimatedVisibility(
-                visible = uiState.running && uiState.phase != ExecutionPhase.NONE,
-                enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(tween(OsMotion.Normal)),
-                exit = slideOutVertically(targetOffsetY = { -it }) + fadeOut(tween(OsMotion.Fast))
-            ) {
-                GlobalTaskPill(uiState) {
+            // ----- top bar: persistent brand + global task indicator
+            TopBar(
+                uiState = uiState,
+                onTapRunning = {
                     scope.launch {
                         val idx = messages.size + (if (uiState.streamingAnswer != null) 1 else 0)
                         runCatching { listState.animateScrollToItem(idx) }
                     }
                 }
-            }
+            )
 
             if (uiState.offline) {
                 Surface(color = c.warningContainer) {
@@ -143,12 +143,12 @@ fun ChatScreen(
                 }
             }
 
-            // message timeline
+            // ----- message timeline
             LazyColumn(
                 state = listState,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 if (messages.isEmpty() && uiState.streamingAnswer == null && uiState.phase == ExecutionPhase.NONE) {
                     item(key = "empty") {
@@ -160,43 +160,53 @@ fun ChatScreen(
                 }
                 itemsIndexed(messages, key = { _, m -> m.id }) { index, msg ->
                     val prev = messages.getOrNull(index - 1)
-                    Column {
-                        if (prev != null && isDifferentDay(prev.timestamp, msg.timestamp)) {
-                            DateSeparator(msg.timestamp)
-                            Spacer(Modifier.height(6.dp))
+                    if (shouldRenderEvent(msg)) {
+                        Column {
+                            if (prev != null && isDifferentDay(prev.timestamp, msg.timestamp)) {
+                                DateSeparator(msg.timestamp)
+                                Spacer(Modifier.height(6.dp))
+                            }
+                            MessageItem(
+                                msg = msg,
+                                isLatestAssistant = index == messages.lastIndex && uiState.streamingAnswer == null,
+                                running = uiState.running && index == messages.lastIndex
+                            )
                         }
-                        MessageItem(msg)
                     }
                 }
                 uiState.streamingAnswer?.let { streaming ->
                     item(key = "streaming") {
-                        StreamingAnswer(streaming)
+                        StreamingAnswer(text = streaming, running = uiState.running)
                     }
                 }
-                // live execution card sits inside the timeline while a task runs
-                if (uiState.phase != ExecutionPhase.NONE && (uiState.plan.isNotEmpty() || uiState.phase == ExecutionPhase.PLANNING || uiState.attachments.isNotEmpty())) {
+
+                // live execution card (Task Plan + Timeline + friendly error) inline
+                if (uiState.phase != ExecutionPhase.NONE &&
+                    (uiState.plan.isNotEmpty() || uiState.phase == ExecutionPhase.PLANNING || uiState.attachments.isNotEmpty())
+                ) {
                     item(key = "execution") {
                         ExecutionCard(
                             ui = uiState,
-                            onCancel = { viewModel.cancelTask() },
+                            onRetry = { viewModel.retryLast() },
+                            onTryAnother = { viewModel.tryAnotherMethod() },
+                            onStop = {
+                                viewModel.cancelTask()
+                                viewModel.clearError()
+                            },
+                            onDismissError = { viewModel.clearError() },
                             modifier = Modifier.animateItem()
                         )
                     }
                 }
             }
 
-            // approval gate (redesigned)
+            // approval gate (compact inline card)
             uiState.pendingApproval?.let { approval ->
                 ApprovalGate(
                     approval = approval,
                     onAllow = { viewModel.resolveApproval(true) },
                     onDeny = { viewModel.resolveApproval(false) }
                 )
-            }
-
-            // actionable error
-            uiState.lastError?.let { err ->
-                ErrorBanner(err, onDismiss = { viewModel.clearError() }, onOpenSettings = onOpenSettings)
             }
 
             // composer
@@ -245,10 +255,38 @@ fun ChatScreen(
     }
 }
 
-/* ------------------------- global indicator ------------------------- */
+/* ----------------------------- top bar ------------------------------ */
 
 @Composable
-private fun GlobalTaskPill(ui: ChatUiState, onTap: () -> Unit) {
+private fun TopBar(uiState: ChatUiState, onTapRunning: () -> Unit) {
+    val c = osColors()
+    Column(Modifier.fillMaxWidth().background(c.bg)) {
+        // persistent brand row
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("✦", style = MaterialTheme.typography.titleMedium, color = c.accent)
+            Text(
+                "AgentOS",
+                style = MaterialTheme.typography.titleMedium,
+                color = c.textPrimary,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.weight(1f))
+            if (uiState.running && uiState.phase != ExecutionPhase.NONE) {
+                TaskRunningPill(uiState, onTapRunning)
+            }
+        }
+    }
+}
+
+/** ✦ Task running · Browser Agent — appears in the top bar while a task runs. */
+@Composable
+private fun TaskRunningPill(ui: ChatUiState, onTap: () -> Unit) {
     val c = osColors()
     val elapsed = rememberElapsedSeconds(
         active = ui.running && ui.phase != ExecutionPhase.WAITING_APPROVAL,
@@ -256,34 +294,51 @@ private fun GlobalTaskPill(ui: ChatUiState, onTap: () -> Unit) {
     )
     Row(
         Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
             .clip(OsShapes.pill)
             .background(c.surfaceHigh)
-            .border(1.dp, c.accent.copy(alpha = 0.25f), OsShapes.pill)
+            .border(1.dp, c.accent.copy(alpha = 0.28f), OsShapes.pill)
             .clickable(onClick = onTap)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(9.dp)
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        StatusDot(DotState.RUNNING, size = 6f)
+        RunningDot()
         Text(
-            "AgentOS is working",
-            style = MaterialTheme.typography.labelLarge,
+            "Task running",
+            style = MaterialTheme.typography.labelMedium,
             color = c.textPrimary
         )
-        Text(
-            buildString {
-                ui.currentAgent?.let { append("· $it ") }
-                if (ui.plan.isNotEmpty()) append("· ${ui.completedSteps}/${ui.plan.size}")
-                if (elapsed > 0) append(" · ${formatElapsed(elapsed)}")
-            },
-            style = MaterialTheme.typography.labelMedium,
-            color = c.textSecondary,
-            modifier = Modifier.weight(1f),
-            maxLines = 1
-        )
-        Text("View", style = MaterialTheme.typography.labelMedium, color = c.accent)
+        ui.currentAgent?.let {
+            Text("· $it", style = MaterialTheme.typography.labelMedium, color = c.textSecondary, maxLines = 1)
+        }
+        if (ui.plan.isNotEmpty()) {
+            Text(
+                "· ${ui.completedSteps}/${ui.plan.size}",
+                style = MaterialTheme.typography.labelMedium,
+                color = c.textSecondary
+            )
+        }
+        if (elapsed > 0) {
+            Text("· ${formatElapsed(elapsed)}", style = MonoStyle.copy(fontSize = 11.sp), color = c.textMuted)
+        }
+    }
+}
+
+/** A tiny pulsing dot — used by the task running pill. */
+@Composable
+private fun RunningDot() {
+    val c = osColors()
+    val transition = rememberInfiniteTransition(label = "runningDot")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing), RepeatMode.Reverse),
+        label = "runningDotAlpha"
+    )
+    Canvas(Modifier.size(8.dp)) {
+        val r = size.minDimension / 2f
+        drawCircle(c.accent.copy(alpha = alpha * 0.35f), radius = r)
+        drawCircle(c.accent, radius = r * 0.55f)
     }
 }
 
@@ -363,7 +418,7 @@ private fun EmptyState(onSuggestion: (String) -> Unit, onOpenSettings: () -> Uni
 fun BrandMark(size: Float = 28f, modifier: Modifier = Modifier) {
     val c = osColors()
     val breath by com.agentos.app.ui.theme.rememberBreathing(0.4f, 0.9f)
-    androidx.compose.foundation.Canvas(modifier.size((size * 2f).dp)) {
+    Canvas(modifier.size((size * 2f).dp)) {
         val r = this.size.minDimension / 2f
         drawCircle(c.accent.copy(alpha = breath * 0.22f), radius = r)
         drawCircle(c.accent.copy(alpha = breath * 0.12f), radius = r * 0.65f)
@@ -387,42 +442,82 @@ fun BrandMark(size: Float = 28f, modifier: Modifier = Modifier) {
 
 /* --------------------------- message items -------------------------- */
 
+/**
+ * Decide whether an EVENT row should be rendered at all. We hide raw plan
+ * log dumps and internal step/tool events — the Task Plan Card and Execution
+ * Timeline are the visualization. We keep user-facing INFO/RECOVERY/REPLAN/
+ * VERIFICATION/PARTIAL events as subtle text.
+ */
+private fun shouldRenderEvent(msg: MessageEntity): Boolean {
+    if (msg.role != MessageRole.EVENT.name) return true
+    val type = msg.eventType
+    return when (type) {
+        // internal — visualized by the Task Plan Card and Timeline, never shown as text
+        EventType.PLANNING.name,
+        EventType.AGENT_STARTED.name,
+        EventType.AGENT_FINISHED.name,
+        EventType.TOOL_STARTED.name,
+        EventType.TOOL_FINISHED.name,
+        EventType.STEP_STATUS.name,
+        EventType.TASK_STATUS.name,
+        EventType.APPROVAL_RESOLVED.name,
+        EventType.SCREENSHOT.name,
+        EventType.ERROR.name -> false
+        EventType.APPROVAL_REQUIRED.name -> true // shown as inline approval card
+        EventType.INFO.name -> {
+            // hide raw plan dump logs ("Plan (…): …", "Plan ready:", "Plan drop:")
+            val t = msg.text.trim()
+            !t.startsWith("Plan (", ignoreCase = true) &&
+                !t.startsWith("Plan ready:", ignoreCase = true) &&
+                !t.startsWith("Plan drop:", ignoreCase = true)
+        }
+        // user-facing status changes
+        EventType.RECOVERY.name, EventType.REPLAN.name,
+        EventType.VERIFICATION.name, EventType.PARTIAL.name -> true
+        null -> true
+        else -> true
+    }
+}
+
 @Composable
-fun MessageItem(msg: MessageEntity) {
+fun MessageItem(msg: MessageEntity, isLatestAssistant: Boolean = false, running: Boolean = false) {
     when (msg.role) {
         MessageRole.USER.name -> UserMessage(msg)
-        MessageRole.ASSISTANT.name -> AssistantMessage(msg)
+        MessageRole.ASSISTANT.name -> AssistantMessage(msg, running = isLatestAssistant && running)
         MessageRole.EVENT.name -> EventRow(msg)
         else -> SystemNote(msg.text)
     }
 }
 
+/** Compact user message: small left-aligned row, no bubble. "User · message text". */
 @Composable
 private fun UserMessage(msg: MessageEntity) {
     val c = osColors()
-    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
-        Box(
-            Modifier
-                .widthIn(max = 320.dp)
-                .clip(RoundedCornerShape(18.dp, 18.dp, 6.dp, 18.dp))
-                .background(c.surfaceAccent)
-                .border(1.dp, c.accent.copy(alpha = 0.22f), RoundedCornerShape(18.dp, 18.dp, 6.dp, 18.dp))
-                .padding(horizontal = 14.dp, vertical = 10.dp)
-        ) {
-            Text(msg.text, style = MaterialTheme.typography.bodyMedium, color = c.textPrimary)
-        }
-        Spacer(Modifier.height(2.dp))
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
         Text(
-            formatTime(msg.timestamp),
-            style = MaterialTheme.typography.labelSmall,
+            "User",
+            style = MaterialTheme.typography.labelMedium,
             color = c.textMuted,
-            modifier = Modifier.padding(end = 2.dp)
+            fontWeight = FontWeight.SemiBold
         )
+        Text("·", style = MaterialTheme.typography.labelMedium, color = c.textMuted)
+        SelectionContainer(Modifier.weight(1f)) {
+            Text(
+                msg.text,
+                style = MaterialTheme.typography.bodyMedium,
+                color = c.textPrimary
+            )
+        }
     }
 }
 
+/** Agent message: small "✦ AgentOS" header on its own line, then the answer below. */
 @Composable
-private fun AssistantMessage(msg: MessageEntity) {
+private fun AssistantMessage(msg: MessageEntity, running: Boolean = false) {
     val c = osColors()
     val clipboard = LocalClipboardManager.current
     var copied by remember { mutableStateOf(false) }
@@ -433,14 +528,20 @@ private fun AssistantMessage(msg: MessageEntity) {
         }
     }
     Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AgentBadge(msg.agentName ?: "AgentOS")
+        AgentHeader(running = running)
+        Spacer(Modifier.height(4.dp))
+        MarkdownText(msg.text, Modifier.fillMaxWidth())
+        Spacer(Modifier.height(2.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             Text(
                 formatTime(msg.timestamp),
                 style = MaterialTheme.typography.labelSmall,
                 color = c.textMuted
             )
-            Spacer(Modifier.weight(1f))
             Text(
                 if (copied) "Copied ✓" else "Copy",
                 style = MaterialTheme.typography.labelSmall,
@@ -451,24 +552,67 @@ private fun AssistantMessage(msg: MessageEntity) {
                         clipboard.setText(AnnotatedString(msg.text))
                         copied = true
                     }
-                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
             )
         }
-        Spacer(Modifier.height(6.dp))
-        MarkdownText(msg.text, Modifier.fillMaxWidth())
     }
 }
 
 @Composable
-private fun StreamingAnswer(text: String) {
-    val c = osColors()
+private fun StreamingAnswer(text: String, running: Boolean = true) {
     Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AgentBadge("AgentOS", live = true)
+        AgentHeader(running = running)
+        Spacer(Modifier.height(4.dp))
+        MarkdownText(text, Modifier.fillMaxWidth(), streaming = true)
+    }
+}
+
+/**
+ * Compact agent header — small "✦ AgentOS" line.
+ * When [running], a slow ambient blue/violet radial glow breathes behind the
+ * header. NOT the whole screen — just the header row.
+ */
+@Composable
+fun AgentHeader(running: Boolean = false, modifier: Modifier = Modifier) {
+    val c = osColors()
+    val breath by com.agentos.app.ui.theme.rememberBreathing(0.20f, 0.65f)
+    val glow = if (running) breath else 0f
+    Row(
+        modifier
+            .clip(RoundedCornerShape(10.dp))
+            .drawBehind {
+                if (glow > 0.01f) {
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                c.accent.copy(alpha = glow * 0.18f),
+                                c.accentViolet.copy(alpha = glow * 0.10f),
+                                Color.Transparent
+                            ),
+                            center = Offset(size.height * 0.4f, size.height * 0.5f),
+                            radius = size.minDimension * 2.4f
+                        )
+                    )
+                }
+            }
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(
+            "✦",
+            style = MaterialTheme.typography.titleSmall,
+            color = if (running) c.accent else c.textSecondary
+        )
+        Text(
+            "AgentOS",
+            style = MaterialTheme.typography.labelLarge,
+            color = if (running) c.accent else c.textSecondary,
+            fontWeight = FontWeight.SemiBold
+        )
+        if (running) {
             BlinkingCursor()
         }
-        Spacer(Modifier.height(6.dp))
-        MarkdownText(text, Modifier.fillMaxWidth(), streaming = true)
     }
 }
 
@@ -476,7 +620,7 @@ private fun StreamingAnswer(text: String) {
 @Composable
 fun BlinkingCursor() {
     val c = osColors()
-    val transition = androidx.compose.animation.core.rememberInfiniteTransition(label = "cursor")
+    val transition = rememberInfiniteTransition(label = "cursor")
     val alpha by transition.animateFloat(
         initialValue = 1f,
         targetValue = 0.15f,
@@ -491,38 +635,34 @@ fun BlinkingCursor() {
     )
 }
 
-/** Timeline event: agent action, humanized. Details stay in Developer mode. */
+/**
+ * Timeline event: only user-facing ones survive [shouldRenderEvent].
+ * Rendered as a small subtle text row — no chain-of-thought, no raw logs.
+ */
 @Composable
 private fun EventRow(msg: MessageEntity) {
     val c = osColors()
-    val isError = msg.severity == com.agentos.app.domain.model.EventSeverity.ERROR.name
+    val isApproval = msg.eventType == EventType.APPROVAL_REQUIRED.name
+    val isRecovery = msg.eventType == EventType.RECOVERY.name
+    val isReplan = msg.eventType == EventType.REPLAN.name
+    val isVerify = msg.eventType == EventType.VERIFICATION.name
+    val tint = when {
+        isApproval -> c.warning
+        isRecovery || isReplan -> c.accentViolet
+        isVerify -> c.success
+        else -> c.textSecondary
+    }
     Row(
         Modifier.fillMaxWidth().padding(vertical = 1.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        StatusDot(
-            when {
-                isError -> DotState.ERROR
-                msg.eventType == EventType.APPROVAL_REQUIRED.name -> DotState.WAITING
-                msg.eventType == EventType.AGENT_FINISHED.name || msg.eventType == EventType.TASK_STATUS.name -> DotState.DONE
-                else -> DotState.IDLE
-            },
-            size = 5f
-        )
-        Column {
-            msg.agentName?.let { agent ->
-                Text(
-                    agent,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (isError) c.error else c.textSecondary
-                )
-            }
+        Text("·", style = MaterialTheme.typography.bodySmall, color = tint)
+        SelectionContainer(Modifier.weight(1f)) {
             Text(
                 msg.text,
                 style = MaterialTheme.typography.bodySmall,
-                color = if (isError) c.error else c.textSecondary,
+                color = tint.copy(alpha = 0.85f),
                 maxLines = 3
             )
         }
@@ -591,6 +731,12 @@ private fun isYesterday(ts: Long): Boolean {
 private fun formatTime(ts: Long): String =
     SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(ts))
 
+internal fun formatElapsed(seconds: Int): String = when {
+    seconds < 60 -> "${seconds}s"
+    seconds < 3600 -> "${seconds / 60}m ${seconds % 60}s"
+    else -> "${seconds / 3600}h ${(seconds % 3600) / 60}m"
+}
+
 /* --------------------------- approval gate --------------------------- */
 
 @Composable
@@ -605,48 +751,33 @@ private fun ApprovalGate(approval: PendingApprovalUi, onAllow: () -> Unit, onDen
             .clip(OsShapes.card)
             .background(c.warningContainer)
             .border(1.dp, c.warning.copy(alpha = 0.4f), OsShapes.card)
-            .padding(16.dp),
+            .padding(14.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            androidx.compose.material3.Icon(
-                Icons.Rounded.Warning,
-                contentDescription = null,
-                tint = c.warning,
-                modifier = Modifier.size(18.dp)
-            )
-            Text("Approval needed", style = MaterialTheme.typography.titleMedium, color = c.textPrimary)
+            Text("⏸", style = MaterialTheme.typography.titleSmall, color = c.warning)
+            Text("Approval needed", style = MaterialTheme.typography.titleSmall, color = c.textPrimary)
         }
         Spacer(Modifier.height(4.dp))
         Text(
-            "AgentOS wants to:",
+            "AgentOS wants to " +
+                toolHumanSummary(approval.tool, approval.args).ifBlank { toolDisplayName(approval.tool).lowercase() } +
+                ".",
             style = MaterialTheme.typography.bodySmall,
-            color = c.textSecondary
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            toolHumanSummary(approval.tool, approval.args).ifBlank { toolDisplayName(approval.tool) },
-            style = MaterialTheme.typography.titleSmall,
-            color = c.warning,
+            color = c.textSecondary,
             textAlign = TextAlign.Center
         )
-        Text(
-            toolDisplayName(approval.tool) + " · " + approval.tool,
-            style = MonoStyle,
-            color = c.textMuted
-        )
         if (approval.reason.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(4.dp))
             Text(
                 approval.reason,
-                style = MaterialTheme.typography.bodySmall,
-                color = c.textSecondary,
+                style = MaterialTheme.typography.labelSmall,
+                color = c.textMuted,
                 textAlign = TextAlign.Center
             )
         }
-        // raw details (what exactly will run) — opt-in, developer-friendly
         Text(
-            if (showDetails) "Hide details" else "View details",
+            if (showDetails) "Hide technical details" else "View technical details",
             style = MaterialTheme.typography.labelSmall,
             color = c.accent,
             modifier = Modifier
@@ -654,7 +785,11 @@ private fun ApprovalGate(approval: PendingApprovalUi, onAllow: () -> Unit, onDen
                 .clickable { showDetails = !showDetails }
                 .padding(horizontal = 10.dp, vertical = 5.dp)
         )
-        AnimatedVisibility(visible = showDetails, enter = androidx.compose.animation.expandVertically() + fadeIn(), exit = androidx.compose.animation.shrinkVertically() + fadeOut()) {
+        AnimatedVisibility(
+            visible = showDetails,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut()
+        ) {
             Text(
                 prettyJson(approval.args),
                 style = MonoStyle,
@@ -668,7 +803,7 @@ private fun ApprovalGate(approval: PendingApprovalUi, onAllow: () -> Unit, onDen
                     .padding(10.dp)
             )
         }
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             TextButton(
                 onClick = onDeny,
@@ -686,38 +821,3 @@ private fun prettyJson(raw: String): String = runCatching {
     val el = kotlinx.serialization.json.Json.parseToJsonElement(raw)
     el.toString().replace(",", ",\n").replace("{", "{\n  ").replace("}", "\n}")
 }.getOrDefault(raw)
-
-/* ----------------------------- error UX ------------------------------ */
-
-@Composable
-private fun ErrorBanner(message: String, onDismiss: () -> Unit, onOpenSettings: () -> Unit) {
-    val c = osColors()
-    val isConfigIssue = message.contains("key", true) || message.contains("provider", true) || message.contains("api", true)
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 6.dp)
-            .clip(OsShapes.cardSmall)
-            .background(c.errorContainer)
-            .padding(14.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            androidx.compose.material3.Icon(
-                Icons.Rounded.Warning,
-                contentDescription = null,
-                tint = c.error,
-                modifier = Modifier.size(16.dp)
-            )
-            Text("Task couldn't be completed", style = MaterialTheme.typography.titleSmall, color = c.error)
-        }
-        Spacer(Modifier.height(4.dp))
-        Text(message, style = MaterialTheme.typography.bodySmall, color = c.textPrimary)
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = onDismiss) { Text("Dismiss", color = c.textSecondary) }
-            if (isConfigIssue) {
-                TextButton(onClick = onOpenSettings) { Text("Open Settings", color = c.accent) }
-            }
-        }
-    }
-}

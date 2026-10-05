@@ -1,5 +1,10 @@
 package com.agentos.app.ui.settings
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings as AndroidSettings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.agentos.app.core.logging.Logger
@@ -18,14 +23,15 @@ import com.agentos.app.data.settings.SettingsRepository
 import com.agentos.app.data.settings.ShellSettings
 import com.agentos.app.data.termux.TermuxBridge
 import com.agentos.app.data.accessibility.AndroidAutomationTools
+import com.agentos.app.service.TaskForegroundService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.util.UUID
 
 data class SettingsUiState(
@@ -33,6 +39,8 @@ data class SettingsUiState(
     val fallbackProviderId: String? = null,
     val keys: Map<String, String> = emptyMap(),     // masked preview only
     val accessibilityEnabled: Boolean = false,
+    val overlayEnabled: Boolean = false,
+    val foregroundServiceRunning: Boolean = false,
     val termuxStatus: String? = null,
     val mcpStatus: Map<String, String> = emptyMap(), // serverId -> "connected: N tools" / error
     val wipeMessage: String? = null,
@@ -40,6 +48,7 @@ data class SettingsUiState(
 )
 
 class SettingsViewModel(
+    private val appContext: Context,
     private val settings: SettingsRepository,
     private val secureStore: SecureStore,
     private val termux: TermuxBridge,
@@ -87,6 +96,8 @@ class SettingsViewModel(
         }
         viewModelScope.launch {
             refreshAccessibility()
+            refreshOverlay(appContext)
+            refreshForegroundService()
         }
         Logger.addListener { _ -> logsFlow.value = Logger.recent() }
     }
@@ -153,6 +164,58 @@ class SettingsViewModel(
     fun refreshAccessibility() {
         val enabled = androidTools.isEnabledBySettings
         _ui.value = _ui.value.copy(accessibilityEnabled = enabled)
+    }
+
+    /* -------------------- overlay -------------------- */
+
+    /**
+     * Re-reads whether the system "display over other apps" permission is
+     * granted. Call after the user returns from the system permission screen.
+     */
+    fun refreshOverlay(context: Context) {
+        val enabled = canDrawOverlays(context)
+        _ui.value = _ui.value.copy(overlayEnabled = enabled)
+    }
+
+    /** Version-safe overlay permission check. */
+    private fun canDrawOverlays(context: Context): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) AndroidSettings.canDrawOverlays(context) else true
+
+    /**
+     * Builds the Intent that opens the system "display over other apps"
+     * screen for this app. Returns null on pre-M devices where the
+     * permission is implicit.
+     */
+    fun overlayPermissionIntent(context: Context): Intent? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
+        return Intent(
+            AndroidSettings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:" + context.packageName)
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+
+    /* -------------------- foreground service -------------------- */
+
+    /** Updates the in-memory flag shown on the Background Tasks card. */
+    fun refreshForegroundService() {
+        _ui.value = _ui.value.copy(foregroundServiceRunning = TaskForegroundService.isRunning)
+    }
+
+    /**
+     * Starts the foreground service (with a dummy "Test" payload), then stops
+     * it after 2 seconds so the user can see the notification appear and
+     * disappear. Refreshes UI state on both ends.
+     */
+    fun testForegroundService(context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { TaskForegroundService.start(context, "Test") }
+            delay(2_000L)
+            runCatching { TaskForegroundService.stop(context) }
+            // give the service a beat to run onDestroy
+            delay(150L)
+            refreshForegroundService()
+        }
+        refreshForegroundService()
     }
 
     /* -------------------- MCP -------------------- */
