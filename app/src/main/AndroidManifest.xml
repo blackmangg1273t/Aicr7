@@ -12,6 +12,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Floating task overlay (display over other apps) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <!-- Screen capture requires user consent via MediaProjection every session -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
@@ -73,5 +76,22 @@
             android:name=".service.TaskForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Floating task overlay service (foreground service that owns the WindowManager view) -->
+        <service
+            android:name=".service.OverlayService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Receives Pause/Cancel/Open actions from the foreground notification -->
+        <receiver
+            android:name=".service.TaskActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.agentos.app.TASK_OPEN" />
+                <action android:name="com.agentos.app.TASK_PAUSE" />
+                <action android:name="com.agentos.app.TASK_CANCEL" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

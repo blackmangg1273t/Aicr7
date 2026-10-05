@@ -10,6 +10,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.agentos.app.core.logging.Logger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -18,9 +19,14 @@ import kotlinx.coroutines.withTimeoutOrNull
  * turns it on in system Settings > Accessibility. Provides:
  * - tap / long-press / swipe via real gesture dispatch
  * - click nodes by visible text or resource id
- * - type text into the focused editable field
+ * - type text into the focused editable field (with hint matching)
  * - scroll, global back/home actions
  * - a structured snapshot of the current screen for the agent
+ *
+ * Synchronization: provides [awaitActiveWindow] / [awaitPackage] helpers that
+ * poll briefly for the active window / foreground package instead of throwing
+ * instantly on a transient null root. Tools should call these before reading
+ * [rootInActiveWindow] directly.
  */
 class AssistantAccessibilityService : AccessibilityService() {
 
@@ -36,6 +42,9 @@ class AssistantAccessibilityService : AccessibilityService() {
             )
     }
 
+    /** Service is enabled but no window is active (transient). */
+    class NoActiveWindowException(message: String) : Exception(message)
+    /** Service is not enabled in system Settings. */
     class AccessibilityNotEnabled(message: String) : Exception(message)
 
     override fun onServiceConnected() {
@@ -52,11 +61,60 @@ class AssistantAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {}
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // We deliberately don't act on events here; tools poll the current state
+        // when invoked. Keeping this handler empty avoids surprising side effects.
+    }
+
+    /* ---------------------- synchronization helpers ---------------------- */
+
+    /**
+     * Waits up to [timeoutMs] for [rootInActiveWindow] to be non-null.
+     * Polls every [pollMs] on the main thread. Throws [NoActiveWindowException]
+     * on timeout — distinguishes "transient gap" from "service not enabled".
+     */
+    suspend fun awaitActiveWindow(timeoutMs: Long = 4_000L, pollMs: Long = 150L): AccessibilityNodeInfo =
+        withContext(Dispatchers.Main) {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                rootInActiveWindow?.let { return@withContext it }
+                delay(pollMs)
+            }
+            throw NoActiveWindowException(
+                "No active window after ${timeoutMs}ms — the target app may not have launched, " +
+                "or it may be drawing over another window. Try launch_app again or wait a moment."
+            )
+        }
+
+    /**
+     * Waits up to [timeoutMs] for the foreground package to equal [pkg].
+     * Returns true on success, false on timeout. Polls via [rootInActiveWindow]
+     * (which gives us the package of the currently focused window).
+     */
+    suspend fun awaitPackage(pkg: String, timeoutMs: Long = 5_000L, pollMs: Long = 150L): Boolean =
+        withContext(Dispatchers.Main) {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                val pn = rootInActiveWindow?.packageName
+                if (pn != null && pn == pkg) return@withContext true
+                delay(pollMs)
+            }
+            false
+        }
+
+    /** Returns the package name of the current foreground window, or null. */
+    suspend fun foregroundPackage(timeoutMs: Long = 600L): String? = withContext(Dispatchers.Main) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            rootInActiveWindow?.packageName?.let { return@withContext it.toString() }
+            delay(100)
+        }
+        null
+    }
 
     /* ---------------------- gestures ---------------------- */
 
-    suspend fun tap(x: Int, y: Int): Boolean = dispatchSingle(x, y, 50L)
+    suspend fun tap(x: Int, y: Int): Boolean = dispatchSingle(x, y, 80L)
 
     suspend fun longPress(x: Int, y: Int): Boolean = dispatchSingle(x, y, 600L)
 
@@ -97,13 +155,14 @@ class AssistantAccessibilityService : AccessibilityService() {
 
     suspend fun clickByText(text: String): String {
         val service = require()
-        return withTimeoutOrNull(5_000) {
+        return withTimeoutOrNull(8_000) {
             withContext(Dispatchers.Main) {
-                val root = service.rootInActiveWindow ?: throw AccessibilityNotEnabled("No active window is accessible right now")
+                val root = awaitActiveWindow()
                 val nodes = root.findAccessibilityNodeInfosByText(text)
                 val match = nodes.firstOrNull { n ->
                     n.isClickable || (n.text?.toString()?.contains(text, ignoreCase = true) == true)
-                } ?: nodes.firstOrNull() ?: throw NoSuchElementException("No UI element containing \"$text\" found on screen")
+                } ?: nodes.firstOrNull()
+                    ?: throw NoSuchElementException("No UI element containing \"$text\" found on screen")
                 val bounds = Rect().also { match.getBoundsInScreen(it) }
                 val clickable = walkToClickable(match) ?: match
                 val performed = clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -132,9 +191,9 @@ class AssistantAccessibilityService : AccessibilityService() {
 
     suspend fun typeText(text: String, intoHint: String? = null): String {
         val service = require()
-        return withTimeoutOrNull(5_000) {
+        return withTimeoutOrNull(8_000) {
             withContext(Dispatchers.Main) {
-                val root = service.rootInActiveWindow ?: throw AccessibilityNotEnabled("No active window is accessible right now")
+                val root = awaitActiveWindow()
                 val target = findEditable(root, intoHint)
                     ?: throw NoSuchElementException(
                         "No editable field found" + (intoHint?.let { " matching \"$it\"" } ?: ". Tap a field first, then retry.")
@@ -144,10 +203,15 @@ class AssistantAccessibilityService : AccessibilityService() {
                 }
                 val ok = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
                 if (!ok) {
-                    // fallback: focus + real clipboard-free typing via ACTION_PASTE is unreliable; report honestly
                     throw IllegalStateException("Field rejected SET_TEXT action (app $packageName may restrict accessibility editing)")
                 }
-                "Typed ${text.length} chars into ${target.viewIdResourceName ?: target.className}"
+                // Verify: re-read the field and confirm the text actually went in.
+                val verified = runCatching {
+                    target.refresh()
+                    val nowText = target.text?.toString().orEmpty()
+                    if (nowText == text) "verified" else "field_text='$nowText'"
+                }.getOrDefault("verify_failed")
+                "Typed ${text.length} chars into ${target.viewIdResourceName ?: target.className?.toString()?.substringAfterLast('.')} ($verified)"
             }
         } ?: throw IllegalStateException("typeText timed out")
     }
@@ -161,7 +225,10 @@ class AssistantAccessibilityService : AccessibilityService() {
             visited++
             if (n.isEditable || (n.className?.toString()?.contains("EditText") == true)) {
                 val matchHint = hint?.let { h ->
-                    val hay = listOfNotNull(n.text?.toString(), n.contentDescription?.toString(), n.hintText?.toString(), n.viewIdResourceName).joinToString(" ")
+                    val hay = listOfNotNull(
+                        n.text?.toString(), n.contentDescription?.toString(),
+                        n.hintText?.toString(), n.viewIdResourceName
+                    ).joinToString(" ")
                     hay.contains(h, ignoreCase = true)
                 } ?: false
                 if (matchHint || hint == null) {
@@ -197,7 +264,7 @@ class AssistantAccessibilityService : AccessibilityService() {
     suspend fun screenSnapshot(maxNodes: Int = 60): String {
         val service = require()
         return withContext(Dispatchers.Main) {
-            val root = service.rootInActiveWindow ?: throw AccessibilityNotEnabled("No active window is accessible right now")
+            val root = awaitActiveWindow()
             val sb = StringBuilder()
             sb.appendLine("PACKAGE: ${root.packageName}")
             val queue = ArrayDeque<AccessibilityNodeInfo>().also { it.add(root) }
@@ -217,7 +284,7 @@ class AssistantAccessibilityService : AccessibilityService() {
                         if (n.isScrollable) add("scrollable")
                     }.joinToString(",")
                     val id = n.viewIdResourceName ?: ""
-                    sb.appendLine("[$count] ${n.className?.toString()?.substringAfterLast('.')} id=$id bounds=(${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}) ${flags} text=\"${n.text}\" desc=\"${n.contentDescription ?: ""}\"")
+                    sb.appendLine("[$count] ${n.className?.toString()?.substringAfterLast('.')} id=$id bounds=(${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}) $flags text=\"${n.text}\" desc=\"${n.contentDescription ?: ""}\"")
                 }
                 for (i in 0 until n.childCount) n.getChild(i)?.let { queue.add(it) }
             }

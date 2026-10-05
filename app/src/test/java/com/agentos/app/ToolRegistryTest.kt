@@ -66,7 +66,7 @@ class ToolRegistryTest {
         val names = registry.all().map { it.name }.toSet()
         val expected = setOf(
             "web_search", "web_fetch",
-            "browser_open", "browser_read", "browser_click", "browser_type", "browser_back", "browser_evaluate", "browser_current_url",
+            "browser_open", "browser_read", "browser_click", "browser_type", "browser_wait", "browser_back", "browser_evaluate", "browser_current_url",
             "device_info", "launch_app", "open_url", "take_screenshot",
             "shell_exec", "file_read", "file_write", "file_list", "file_delete", "git",
             "android_ui_status", "ui_tap", "ui_click_text", "ui_type", "ui_scroll", "ui_back", "ui_home", "ui_snapshot",

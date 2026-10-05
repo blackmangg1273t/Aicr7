@@ -12,6 +12,10 @@ import com.agentos.app.domain.tools.Tool
 import com.agentos.app.domain.tools.ToolContext
 import com.agentos.app.domain.tools.ToolResult
 import com.agentos.app.domain.tools.ToolRisk
+import com.agentos.app.service.AssistantAccessibilityService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import java.util.UUID
 
@@ -48,13 +52,18 @@ class DeviceInfoTool(private val appContext: Context) : Tool {
     }
 }
 
-/** Launches an installed app by package name (real PackageManager launch). */
+/**
+ * Launches an installed app by package name (real PackageManager launch).
+ * After startActivity, optionally polls the accessibility service for the
+ * foreground package to confirm the launch actually succeeded (gives the
+ * next step a clean window to operate on).
+ */
 class LaunchAppTool(private val appContext: Context) : Tool {
     override val name = "launch_app"
-    override val description = "Launches an installed Android app by package name (e.g. com.android.chrome, com.google.android.youtube)."
+    override val description = "Launches an installed Android app by package name and waits briefly for it to become the foreground activity. Accepts either 'package' (e.g. com.android.chrome) or 'search' (an app name like 'YouTube')."
     override val risk = ToolRisk.MODERATE
     override val category = "Device"
-    override val inputSchema = """{"package": "string (required)", "search": "string (optional: find package by app name instead)"}"""
+    override val inputSchema = """{"package": "string (e.g. com.google.android.youtube)", "search": "string (optional: find package by app name like 'YouTube' instead of 'package')"}"""
 
     override suspend fun execute(args: JsonObject, ctx: ToolContext): ToolResult {
         var pkg = Args.str(args, "package")
@@ -73,13 +82,31 @@ class LaunchAppTool(private val appContext: Context) : Tool {
 
         return try {
             val intent = pm.getLaunchIntentForPackage(pkg)
-            if (intent == null) ToolResult(false, "", "Package '$pkg' is not installed or has no launchable activity")
-            else {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                ctx.onActivity("Launching $pkg…")
-                appContext.startActivity(intent)
-                ToolResult(true, "Launched $pkg")
-            }
+                ?: return ToolResult(false, "", "Package '$pkg' is not installed or has no launchable activity")
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            ctx.onActivity("Launching $pkg…")
+            appContext.startActivity(intent)
+
+            // Wait briefly for the package to become foreground (only if the
+            // accessibility service is enabled — otherwise the next step will
+            // surface its own honest failure). This fixes the "ui_type failed:
+            // No active window is accessible right now" race.
+            val foregroundWaitMs = if (AssistantAccessibilityService.isRunning()) {
+                ctx.onActivity("Waiting for $pkg to come to foreground…")
+                val ok = AssistantAccessibilityService.require().awaitPackage(pkg, timeoutMs = 5_000)
+                if (!ok) {
+                    return ToolResult(
+                        true,
+                        "Launched $pkg (foreground not confirmed after 5s — UI tools may need a brief wait)"
+                    )
+                }
+                5000
+            } else -1
+
+            ToolResult(
+                true,
+                "Launched $pkg" + (if (foregroundWaitMs >= 0) " (foreground after ${foregroundWaitMs}ms)" else " (a11y service off — sync skipped)")
+            )
         } catch (e: Exception) {
             ToolResult(false, "", "launch_app failed: ${e.message}")
         }

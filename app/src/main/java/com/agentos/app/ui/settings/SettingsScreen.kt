@@ -9,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,13 +17,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -48,10 +52,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import android.content.Intent
 import android.provider.Settings as AndroidSettings
 import com.agentos.app.core.logging.Logger
@@ -62,8 +63,9 @@ import com.agentos.app.data.settings.BrowserSettings
 import com.agentos.app.data.settings.McpServerConfig
 import com.agentos.app.data.settings.PrivacySettings
 import com.agentos.app.data.settings.ShellSettings
+import com.agentos.app.ui.components.DotState
+import com.agentos.app.ui.components.StatusDot
 import com.agentos.app.ui.theme.MonoStyle
-import com.agentos.app.ui.theme.OsMotion
 import com.agentos.app.ui.theme.OsShapes
 import com.agentos.app.ui.theme.osColors
 
@@ -74,14 +76,14 @@ import com.agentos.app.ui.theme.osColors
 private enum class SSection(val title: String, val hint: String, val openByDefault: Boolean) {
     AI("AI", "Providers, models, API keys, fallback", true),
     AGENTS("Agents", "Enable or disable each specialist", false),
-    AUTOMATION("Automation", "Android access, browser, Termux", false),
+    AUTOMATION("Automation", "Accessibility, overlay, background tasks, browser, Termux", false),
     CONNECTIONS("Connections", "MCP servers (JSON-RPC over HTTP)", false),
-    PRIVACY("Privacy & Security", "Memory, history, secrets", false),
-    DEV("Developer", "Logs and diagnostics", false)
+    PRIVACY("Privacy", "Memory, history, secrets", false),
+    DEV("Developer", "Diagnostics, logs and tools", false)
 }
 
 @Composable
-fun SettingsScreen(viewModel: SettingsViewModel) {
+fun SettingsScreen(viewModel: SettingsViewModel, onOpenDiagnostics: () -> Unit = {}) {
     val providers by viewModel.providers.collectAsState()
     val agents by viewModel.agents.collectAsState()
     val browser by viewModel.browser.collectAsState()
@@ -119,6 +121,10 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
         SettingsSection(SSection.AUTOMATION) {
             AccessibilityCard(ui, viewModel)
             Spacer(Modifier.height(10.dp))
+            OverlayCard(ui, viewModel)
+            Spacer(Modifier.height(10.dp))
+            BackgroundTasksCard(ui, viewModel)
+            Spacer(Modifier.height(10.dp))
             BrowserSection(browser, viewModel)
             Spacer(Modifier.height(10.dp))
             TermuxSection(shell, ui, viewModel)
@@ -134,6 +140,8 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
         }
         Spacer(Modifier.height(10.dp))
         SettingsSection(SSection.DEV) {
+            DiagnosticsEntry(onOpenDiagnostics = onOpenDiagnostics)
+            Spacer(Modifier.height(10.dp))
             LogsCard(logs)
         }
         Spacer(Modifier.height(30.dp))
@@ -345,8 +353,8 @@ private fun AccessibilityCard(ui: SettingsUiState, viewModel: SettingsViewModel)
         Modifier.fillMaxWidth().clip(OsShapes.card).background(c.surfaceHigh).border(1.dp, c.border, OsShapes.card).padding(15.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            com.agentos.app.ui.components.StatusDot(
-                if (ui.accessibilityEnabled) com.agentos.app.ui.components.DotState.DONE else com.agentos.app.ui.components.DotState.WAITING,
+            StatusDot(
+                if (ui.accessibilityEnabled) DotState.DONE else DotState.WAITING,
                 size = 6f
             )
             Column {
@@ -366,6 +374,70 @@ private fun AccessibilityCard(ui: SettingsUiState, viewModel: SettingsViewModel)
                 }
             }) { Text("Enable in Settings") }
             OutlinedButton(onClick = { viewModel.refreshAccessibility() }) { Text("Refresh") }
+        }
+    }
+}
+
+@Composable
+private fun OverlayCard(ui: SettingsUiState, viewModel: SettingsViewModel) {
+    val c = osColors()
+    val context = LocalContext.current
+    Column(
+        Modifier.fillMaxWidth().clip(OsShapes.card).background(c.surfaceHigh).border(1.dp, c.border, OsShapes.card).padding(15.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            StatusDot(
+                if (ui.overlayEnabled) DotState.DONE else DotState.WAITING,
+                size = 6f
+            )
+            Column(Modifier.weight(1f)) {
+                Text("Floating overlay", style = MaterialTheme.typography.titleSmall, color = c.textPrimary)
+                Text(
+                    if (ui.overlayEnabled) "Enabled — a floating progress card can appear over other apps while tasks run"
+                    else "Disabled — the foreground notification still works, but no floating card appears over other apps",
+                    style = MaterialTheme.typography.bodySmall, color = c.textSecondary
+                )
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                enabled = !ui.overlayEnabled,
+                onClick = {
+                    viewModel.overlayPermissionIntent(context)?.let { intent ->
+                        runCatching { context.startActivity(intent) }
+                    }
+                }
+            ) { Text("Enable overlay") }
+            OutlinedButton(onClick = { viewModel.refreshOverlay(context) }) { Text("Refresh") }
+        }
+    }
+}
+
+@Composable
+private fun BackgroundTasksCard(ui: SettingsUiState, viewModel: SettingsViewModel) {
+    val c = osColors()
+    val context = LocalContext.current
+    Column(
+        Modifier.fillMaxWidth().clip(OsShapes.card).background(c.surfaceHigh).border(1.dp, c.border, OsShapes.card).padding(15.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            StatusDot(
+                if (ui.foregroundServiceRunning) DotState.RUNNING else DotState.IDLE,
+                size = 6f
+            )
+            Column(Modifier.weight(1f)) {
+                Text("Background tasks", style = MaterialTheme.typography.titleSmall, color = c.textPrimary)
+                Text(
+                    "Foreground service keeps long agent tasks alive when the app is backgrounded.",
+                    style = MaterialTheme.typography.bodySmall, color = c.textSecondary
+                )
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { viewModel.testForegroundService(context) }) { Text("Test") }
+            OutlinedButton(onClick = { viewModel.refreshForegroundService() }) { Text("Refresh") }
         }
     }
 }
@@ -499,11 +571,57 @@ private fun PrivacySection(privacy: PrivacySettings, ui: SettingsUiState, viewMo
 /* ------------------------------ developer ---------------------------- */
 
 @Composable
+private fun DiagnosticsEntry(onOpenDiagnostics: () -> Unit) {
+    val c = osColors()
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(OsShapes.card)
+            .background(c.surfaceHigh)
+            .border(1.dp, c.border, OsShapes.card)
+            .clickable(onClick = onOpenDiagnostics)
+            .padding(horizontal = 15.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(11.dp)
+    ) {
+        Box(
+            Modifier
+                .size(34.dp)
+                .clip(CircleShape)
+                .background(c.accentViolet.copy(alpha = 0.13f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Default.BugReport,
+                contentDescription = null,
+                tint = c.accentViolet,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+        Column(Modifier.weight(1f)) {
+            Text("Diagnostics", style = MaterialTheme.typography.titleSmall, color = c.textPrimary)
+            Text(
+                "Live status of services, providers and the task engine",
+                style = MaterialTheme.typography.bodySmall,
+                color = c.textSecondary
+            )
+        }
+        Icon(
+            Icons.Default.ChevronRight,
+            contentDescription = null,
+            tint = c.textMuted
+        )
+    }
+}
+
+@Composable
 private fun LogsCard(logs: List<Logger.Entry>) {
     val c = osColors()
     Column(
         Modifier.fillMaxWidth().clip(OsShapes.card).background(c.surfaceHigh).border(1.dp, c.border, OsShapes.card).padding(12.dp)
     ) {
+        Text("Event logs", style = MaterialTheme.typography.titleSmall, color = c.textPrimary)
+        Spacer(Modifier.height(6.dp))
         SelectionContainer {
             Column {
                 if (logs.isEmpty()) Text("No log entries yet.", style = MaterialTheme.typography.labelSmall, color = c.textMuted)

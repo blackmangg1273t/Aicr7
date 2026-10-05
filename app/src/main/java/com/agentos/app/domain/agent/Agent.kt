@@ -2,13 +2,21 @@ package com.agentos.app.domain.agent
 
 import com.agentos.app.data.provider.AiExecutor
 import com.agentos.app.data.provider.ChatTurn
-import com.agentos.app.data.provider.ProviderConfig
 import com.agentos.app.data.provider.StreamEvent
+import com.agentos.app.domain.model.AgentTask
 import com.agentos.app.domain.model.TaskStep
 import com.agentos.app.domain.tools.ToolContext
 import com.agentos.app.domain.tools.ToolRegistry
 import com.agentos.app.domain.tools.ToolResult
-import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * A real agent. Every agent declares its capabilities and the tools it is
@@ -22,7 +30,7 @@ interface Agent {
     /** Tool names this agent may execute (prefix match allowed with trailing '*'). */
     fun allowedTools(): List<String>
     /** Executes one plan step. Returns the step output text. Throws on failure. */
-    suspend fun runStep(step: TaskStep, task: com.agentos.app.domain.model.AgentTask, ctx: StepContext): String
+    suspend fun runStep(step: TaskStep, task: AgentTask, ctx: StepContext): String
 }
 
 /** Everything an agent may need to execute a step. */
@@ -58,17 +66,18 @@ abstract class BaseAgent : Agent {
         toolCtx: ToolContext
     ): ToolResult {
         val args = runCatching {
-            kotlinx.serialization.json.Json.parseToJsonElement(argsJson).let {
-                it as? kotlinx.serialization.json.JsonObject ?: kotlinx.serialization.json.JsonObject(emptyMap())
+            Json.parseToJsonElement(argsJson).let {
+                it as? JsonObject ?: JsonObject(emptyMap())
             }
-        }.getOrElse { kotlinx.serialization.json.JsonObject(emptyMap()) }
+        }.getOrElse { JsonObject(emptyMap()) }
         return registry.execute(toolName, args, toolCtx)
     }
 }
 
 /**
- * Main orchestrator agent: plans tasks through the AI provider and produces
- * the final synthesis. Its planning is real AI — no keyword hacks.
+ * Main orchestrator agent: plans tasks through the AI provider, can decide
+ * the next step based on intermediate results, and produces the final
+ * synthesis. Its planning is real AI — no keyword hacks.
  */
 class MainAgent(
     private val providerExecutor: AiExecutor
@@ -76,8 +85,8 @@ class MainAgent(
 
     override val name = "main"
     override val displayName = "Main Agent"
-    override val description = "Understands the request, builds an executable plan, coordinates agents and synthesizes the final answer."
-    override val capabilities = listOf("planning", "delegation", "synthesis", "direct_answers")
+    override val description = "Understands the request, builds an executable plan, coordinates agents, can replan based on intermediate results, and synthesizes the final answer."
+    override val capabilities = listOf("planning", "delegation", "synthesis", "replanning", "direct_answers")
 
     override fun allowedTools(): List<String> = listOf()
 
@@ -104,10 +113,13 @@ class MainAgent(
             - Respond with ONLY a JSON object, no markdown fences, no commentary.
             - Schema: {"direct_answer": boolean, "answer": "string when direct_answer is true", "steps": [{"agent": "<agent name>", "tool": "<tool name or null>", "args": {...}, "why": "short reason", "retry_on_failure": false}]}
             - "tool": null means a purely cognitive step for that agent (only 'main' supports this meaningfully).
-            - Use at most 6 steps. Prefer fewer. Only pick steps that genuinely help answer.
+            - Use at most 6 steps. Prefer fewer. Only pick steps that genuinely help.
             - If the request is a simple question/conversation, set direct_answer=true and leave steps empty.
             - If tools can make the answer better (search, files, device), use them.
             - Never invent tool names or argument names.
+            - For browser automation on SPA sites (YouTube, Google, etc.): always include a browser_wait step (or use wait_for in browser_open) BEFORE typing/clicking.
+            - For Android automation: always launch_app first, then ui_* tools. The launch step waits for the app to come to foreground.
+            - For browser_type: matcher accepts '*search*' (glob), 'search' (substring), or '#q' (CSS selector). Default '*first*'.
             ${if (memoryContext.isNotBlank()) "Relevant memories:\n$memoryContext" else ""}
         """.trimIndent()
 
@@ -115,6 +127,56 @@ class MainAgent(
             add(ChatTurn("system", system))
             addAll(chatHistory.takeLast(6))
             add(ChatTurn("user", userRequest))
+        }
+        return aiCall(messages)
+    }
+
+    /**
+     * Decide the next step given the executed steps so far and the observed
+     * state. Returns a NEW plan to continue with, or null if the original plan
+     * should continue as-is. Used for replanning after a step fails.
+     */
+    suspend fun replan(
+        userRequest: String,
+        executedSteps: List<ExecutedStepInfo>,
+        toolsCatalog: String,
+        agentsCatalog: String,
+        chatHistory: List<ChatTurn>,
+        reason: String,
+        aiCall: suspend (List<ChatTurn>) -> String
+    ): String {
+        val transcript = executedSteps.joinToString("\n") { s ->
+            val res = if (s.success) "OK: ${s.result.take(500)}" else "FAILED: ${s.error.take(500)}"
+            "Step ${s.index + 1} [${s.agent}/${s.tool ?: "cognitive"}] ${s.why} → $res"
+        }
+        val system = """
+            You are the Main Agent planner of AgentOS, replanning after a step failure or unexpected state.
+            Original request: "$userRequest"
+            Reason for replanning: $reason
+
+            Already executed steps:
+            $transcript
+
+            Available agents:
+            $agentsCatalog
+
+            Available tools:
+            $toolsCatalog
+
+            Rules:
+            - Output a NEW plan as a strict JSON object with the same schema as the original.
+            - Do NOT re-execute steps that already succeeded (the user's environment has changed).
+            - Inspect the failed step's error and pick a different approach.
+            - Use at most 4 new steps. Prefer fewer.
+            - "direct_answer": true is valid if you can answer from the data already gathered.
+            - Never invent tool names.
+            - For browser_type: matcher accepts '*search*' (glob), 'search' (substring), or '#q' (CSS selector).
+            - Output ONLY the JSON object.
+        """.trimIndent()
+        val messages = buildList {
+            add(ChatTurn("system", system))
+            addAll(chatHistory.takeLast(4))
+            add(ChatTurn("user", "Replan now."))
         }
         return aiCall(messages)
     }
@@ -148,8 +210,19 @@ class MainAgent(
         return answer
     }
 
-    override suspend fun runStep(step: TaskStep, task: com.agentos.app.domain.model.AgentTask, ctx: StepContext): String {
+    override suspend fun runStep(step: TaskStep, task: AgentTask, ctx: StepContext): String {
         // The Main Agent does not execute tools itself; cognitive steps pass through.
         return "Cognitive step acknowledged: ${step.why.ifBlank { step.toolName ?: "analysis" }}"
     }
+
+    /** Compact info about an executed step, used for replanning prompts. */
+    data class ExecutedStepInfo(
+        val index: Int,
+        val agent: String,
+        val tool: String?,
+        val why: String,
+        val success: Boolean,
+        val result: String,
+        val error: String
+    )
 }

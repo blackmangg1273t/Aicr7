@@ -6,4 +6,36 @@
     <string name="task_notification_channel">Agent task execution</string>
     <string name="task_notification_channel_desc">Shows progress while an agent task is running in the background.</string>
     <string name="screen_capture_channel">Screen capture</string>
+
+    <!-- Settings sections -->
+    <string name="settings_section_ai">AI</string>
+    <string name="settings_section_agents">Agents</string>
+    <string name="settings_section_automation">Automation</string>
+    <string name="settings_section_connections">Connections</string>
+    <string name="settings_section_privacy">Privacy</string>
+    <string name="settings_section_developer">Developer</string>
+
+    <!-- Floating overlay card (Automation section) -->
+    <string name="overlay_card_title">Floating overlay</string>
+    <string name="overlay_card_desc">Show a floating progress card while tasks run. Needs the system "display over other apps" permission.</string>
+    <string name="overlay_card_enable">Enable overlay</string>
+    <string name="overlay_card_disabled_desc">Disabled — the foreground notification still works, but no floating card appears over other apps.</string>
+
+    <!-- Background tasks card (Automation section) -->
+    <string name="bg_tasks_card_title">Background tasks</string>
+    <string name="bg_tasks_card_desc">Foreground service keeps long agent tasks alive when the app is backgrounded.</string>
+    <string name="bg_tasks_card_test">Test</string>
+
+    <!-- Diagnostics screen -->
+    <string name="diagnostics_title">Diagnostics</string>
+    <string name="diagnostics_refresh">Refresh</string>
+    <string name="diagnostics_accessibility">Accessibility Service</string>
+    <string name="diagnostics_overlay">Overlay</string>
+    <string name="diagnostics_foreground_service">Foreground Service</string>
+    <string name="diagnostics_browser">Browser Automation</string>
+    <string name="diagnostics_task_engine">Task Engine</string>
+    <string name="diagnostics_ai_provider">AI Provider</string>
+    <string name="diagnostics_last_task">Last task</string>
+    <string name="diagnostics_last_error">Last error</string>
+    <string name="diagnostics_last_recovery">Last recovery</string>
 </resources>

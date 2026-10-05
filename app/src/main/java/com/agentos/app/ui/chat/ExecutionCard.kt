@@ -3,8 +3,10 @@ package com.agentos.app.ui.chat
 import android.graphics.BitmapFactory
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -18,241 +20,563 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
-import androidx.compose.material.icons.rounded.Schedule
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.agentos.app.domain.model.StepStatus
 import com.agentos.app.domain.model.TaskStatus
-import com.agentos.app.ui.components.AgentBadge
-import com.agentos.app.ui.components.DotState
-import com.agentos.app.ui.components.GradientProgressBar
-import com.agentos.app.ui.components.StatusDot
 import com.agentos.app.ui.components.toolDisplayName
 import com.agentos.app.ui.theme.MonoStyle
-import com.agentos.app.ui.theme.OsSprings
+import com.agentos.app.ui.theme.OsMotion
 import com.agentos.app.ui.theme.OsShapes
 import com.agentos.app.ui.theme.osColors
-import com.agentos.app.ui.theme.rememberElapsedSeconds
 
 /* ------------------------------------------------------------------ */
-/* Live Execution Card                                                  */
-/* Shows the REAL plan from the planner, with live step statuses,       */
-/* true elapsed time and expandable step results.                       */
-/* No chain-of-thought: only agent / tool / status / progress.          */
+/* Execution Card — 2026 redesign.                                      */
+/*                                                                       */
+/* Three compact surfaces:                                                */
+/*   1. Task Plan Card — checklist with progress (2 / 3) and View full.   */
+/*   2. Execution Timeline — per-step status, agent, tool, elapsed time.  */
+/*   3. Error Recovery Card — friendly message + Retry / Try another /    */
+/*      Stop buttons + expandable Technical details.                      */
+/*                                                                       */
+/* A slow ambient blue/violet radial glow breathes on the running header. */
+/* No chain-of-thought, no raw plan logs — the cards ARE the visualization. */
 /* ------------------------------------------------------------------ */
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExecutionCard(
     ui: ChatUiState,
-    onCancel: () -> Unit,
+    onRetry: () -> Unit,
+    onTryAnother: () -> Unit,
+    onStop: () -> Unit,
+    onDismissError: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val c = osColors()
-    if (ui.plan.isEmpty() && ui.phase != ExecutionPhase.PLANNING) return
-    var showSheet by remember { mutableStateOf(false) }
+    if (ui.plan.isEmpty() && ui.phase != ExecutionPhase.PLANNING && ui.lastError == null) return
+
     val running = ui.running
     val total = ui.plan.size
     val done = ui.completedSteps
     val finished = ui.finalStatus != null
 
-    // real elapsed time, frozen when the task ends
-    val elapsed = rememberElapsedSeconds(
-        active = running && ui.phase != ExecutionPhase.WAITING_APPROVAL,
-        resetKey = ui.taskId
-    )
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
 
-    if (showSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showSheet = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = c.surface,
-            shape = OsShapes.sheet
+        // ---- (1) Task Plan Card --------------------------------------
+        AnimatedVisibility(
+            visible = ui.plan.isNotEmpty() || ui.phase == ExecutionPhase.PLANNING,
+            enter = fadeIn(tween(OsMotion.Normal)) + expandVertically(tween(OsMotion.Normal)),
+            exit = fadeOut(tween(OsMotion.Fast)) + shrinkVertically(tween(OsMotion.Fast))
         ) {
-            PlanSheetContent(ui)
+            TaskPlanCard(ui = ui, running = running, total = total, done = done)
         }
-    }
 
-    com.agentos.app.ui.components.AuraCard(
-        modifier = modifier.fillMaxWidth().clickable { showSheet = true },
-        active = running
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            // header row
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                StatusDot(
-                    state = when {
-                        ui.finalStatus == TaskStatus.COMPLETED -> DotState.DONE
-                        ui.finalStatus != null -> DotState.ERROR
-                        ui.phase == ExecutionPhase.PLANNING -> DotState.RUNNING
-                        ui.phase == ExecutionPhase.WAITING_APPROVAL -> DotState.WAITING
-                        running -> DotState.RUNNING
-                        else -> DotState.IDLE
-                    }
-                )
-                Spacer(Modifier.width(9.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        when {
-                            ui.phase == ExecutionPhase.PLANNING -> "Planning…"
-                            ui.finalStatus == TaskStatus.COMPLETED -> "Completed"
-                            ui.finalStatus == TaskStatus.CANCELLED -> "Cancelled"
-                            ui.finalStatus == TaskStatus.FAILED -> "Needs attention"
-                            ui.phase == ExecutionPhase.WAITING_APPROVAL -> "Waiting for you"
-                            else -> "Working on your task"
-                        },
-                        style = MaterialTheme.typography.titleSmall,
-                        color = c.textPrimary
-                    )
-                    ui.activePlanStep?.let { step ->
-                        Text(
-                            step.why,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = c.textSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    } ?: ui.currentAgent?.let {
-                        Text(
-                            "$it · " + (ui.currentActivity ?: "working"),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = c.textSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-                // elapsed chip (real)
-                if (elapsed > 0 && !finished) {
-                    Row(
-                        Modifier
-                            .clip(OsShapes.pill)
-                            .background(c.surfaceInteractive)
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            Icons.Rounded.Schedule,
-                            contentDescription = null,
-                            tint = c.textMuted,
-                            modifier = Modifier.size(11.dp)
-                        )
-                        Text(
-                            formatElapsed(elapsed),
-                            style = MonoStyle.copy(fontSize = 10.sp),
-                            color = c.textSecondary
-                        )
-                    }
-                }
-                if (running) {
-                    Text(
-                        "Cancel",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = c.textMuted,
-                        modifier = Modifier
-                            .clip(OsShapes.pill)
-                            .clickable(onClick = onCancel)
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    )
-                } else if (total > 0) {
-                    Text(
-                        "$done / $total",
-                        style = MonoStyle,
-                        color = c.textSecondary
-                    )
-                }
-            }
+        // ---- (2) Execution Timeline ----------------------------------
+        AnimatedVisibility(
+            visible = ui.plan.isNotEmpty(),
+            enter = fadeIn(tween(OsMotion.Normal)) + expandVertically(tween(OsMotion.Normal)),
+            exit = fadeOut(tween(OsMotion.Fast)) + shrinkVertically(tween(OsMotion.Fast))
+        ) {
+            ExecutionTimeline(ui = ui, running = running)
+        }
 
-            // progress bar (real ratio, no fake progress)
-            if (total > 0) {
-                Spacer(Modifier.height(12.dp))
-                GradientProgressBar(
-                    progress = if (total == 0) 0f else done.toFloat() / total,
-                    error = ui.finalStatus == TaskStatus.FAILED
+        // ---- (3) Friendly Error Recovery Card ------------------------
+        AnimatedVisibility(
+            visible = ui.lastError != null && !finished,
+            enter = fadeIn(tween(OsMotion.Normal)) + expandVertically(tween(OsMotion.Normal)),
+            exit = fadeOut(tween(OsMotion.Fast)) + shrinkVertically(tween(OsMotion.Fast))
+        ) {
+            ui.lastError?.let { raw ->
+                ErrorRecoveryCard(
+                    rawError = raw,
+                    recovering = ui.recovering,
+                    onRetry = onRetry,
+                    onTryAnother = onTryAnother,
+                    onStop = onStop,
+                    onDismiss = onDismissError
                 )
             }
+        }
 
-            // steps (peek: first 4, tap for full sheet)
-            if (ui.plan.isNotEmpty()) {
-                Spacer(Modifier.height(10.dp))
-                ui.plan.take(4).forEach { step ->
-                    StepRow(step)
-                }
-                if (ui.plan.size > 4) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "View plan (+${ui.plan.size - 4} more)",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = c.accent,
-                        modifier = Modifier.padding(start = 30.dp, top = 2.dp)
-                    )
-                }
-            }
+        // ---- (3b) Final result summary --------------------------------
+        AnimatedVisibility(
+            visible = finished,
+            enter = fadeIn(tween(OsMotion.Normal)) + expandVertically(tween(OsMotion.Normal)),
+            exit = fadeOut(tween(OsMotion.Fast)) + shrinkVertically(tween(OsMotion.Fast))
+        ) {
+            CompletionResult(ui = ui)
+        }
 
-            // screenshot previews (real attachments)
-            AnimatedVisibility(ui.attachments.isNotEmpty(), enter = fadeIn() + expandVertically()) {
-                Column {
-                    Spacer(Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ui.attachments.take(3).forEach { att ->
-                            ScreenshotPreview(att, Modifier.weight(1f))
-                        }
+        // ---- (3c) Screenshot attachments (real) -----------------------
+        AnimatedVisibility(
+            visible = ui.attachments.isNotEmpty(),
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
+        ) {
+            Column {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ui.attachments.take(3).forEach { att ->
+                        ScreenshotPreview(att, Modifier.weight(1f))
                     }
                 }
-            }
-
-            // completion result reveal (real final result)
-            AnimatedVisibility(
-                visible = finished,
-                enter = fadeIn() + expandVertically(),
-                exit = shrinkVertically()
-            ) {
-                CompletionResult(ui)
             }
         }
     }
 }
 
-/** Animated completion section: spring check + final answer with copy. */
+/* ----------------------- Task Plan Card ---------------------------- */
+
+@Composable
+private fun TaskPlanCard(ui: ChatUiState, running: Boolean, total: Int, done: Int) {
+    val c = osColors()
+    var expanded by remember { mutableStateOf(false) }
+
+    RunningAuraCard(active = running) {
+        Column(Modifier.padding(14.dp)) {
+            // header row: "Task plan" + progress chip
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Task plan",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = c.textPrimary
+                )
+                Spacer(Modifier.weight(1f))
+                if (ui.phase == ExecutionPhase.PLANNING) {
+                    Text(
+                        "Planning…",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = c.accent
+                    )
+                } else if (total > 0) {
+                    ProgressChip(done = done, total = total)
+                }
+            }
+
+            if (ui.phase == ExecutionPhase.PLANNING) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "AgentOS is breaking your request into steps…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = c.textSecondary
+                )
+                Spacer(Modifier.height(8.dp))
+                // shimmer skeleton lines while planning
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    repeat(3) {
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .height(10.dp)
+                                .clip(OsShapes.pill)
+                                .background(c.surfaceInteractive)
+                        )
+                    }
+                }
+            } else if (ui.plan.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                val stepsToShow = if (expanded) ui.plan else ui.plan.take(3)
+                stepsToShow.forEach { step ->
+                    PlanChecklistRow(step)
+                }
+                if (!expanded && ui.plan.size > 3) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "View full plan (+${ui.plan.size - 3} more)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = c.accent,
+                        modifier = Modifier
+                            .clip(OsShapes.pill)
+                            .clickable { expanded = true }
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                } else if (expanded) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Show less",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = c.textMuted,
+                        modifier = Modifier
+                            .clip(OsShapes.pill)
+                            .clickable { expanded = false }
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** A checklist row: ✓ done · ● running · ○ pending · ✕ failed. */
+@Composable
+private fun PlanChecklistRow(step: PlanStepUi) {
+    val c = osColors()
+    val mark = when (step.status) {
+        StepStatus.COMPLETED -> "✓"
+        StepStatus.RUNNING -> "●"
+        StepStatus.FAILED -> "✕"
+        StepStatus.AWAITING_APPROVAL -> "⏸"
+        StepStatus.VERIFIED -> "✓"
+        StepStatus.RECOVERING -> "↻"
+        else -> "○"
+    }
+    val color = when (step.status) {
+        StepStatus.COMPLETED, StepStatus.VERIFIED -> c.success
+        StepStatus.RUNNING, StepStatus.RECOVERING -> c.accent
+        StepStatus.FAILED -> c.error
+        StepStatus.AWAITING_APPROVAL -> c.warning
+        else -> c.textMuted
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(mark, color = color, style = MaterialTheme.typography.titleSmall)
+        Text(
+            step.why,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (step.status == StepStatus.PENDING) c.textSecondary else c.textPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        if (step.status == StepStatus.RUNNING) {
+            Text(
+                "working",
+                style = MaterialTheme.typography.labelSmall,
+                color = c.accent
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProgressChip(done: Int, total: Int) {
+    val c = osColors()
+    Row(
+        Modifier
+            .clip(OsShapes.pill)
+            .background(c.surfaceInteractive)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Text(
+            "$done / $total",
+            style = MonoStyle.copy(fontSize = 11.sp),
+            color = c.textSecondary
+        )
+    }
+}
+
+/* ----------------------- Execution Timeline ------------------------ */
+
+@Composable
+private fun ExecutionTimeline(ui: ChatUiState, running: Boolean) {
+    val c = osColors()
+    // recompute "now" every 200ms while running so live durations update
+    var tick by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(running) {
+        while (running) {
+            kotlinx.coroutines.delay(200)
+            tick = System.currentTimeMillis()
+        }
+    }
+    val refTime = if (running) tick else remember { System.currentTimeMillis() }
+
+    AuraCardSurface(active = running) {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Execution timeline",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = c.textPrimary
+                )
+                Spacer(Modifier.weight(1f))
+                if (ui.attachments.isNotEmpty()) {
+                    Text(
+                        "${ui.attachments.size} screenshot${if (ui.attachments.size > 1) "s" else ""}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = c.textMuted
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            ui.plan.forEach { step ->
+                TimelineRow(step = step, refTime = refTime, running = running)
+            }
+        }
+    }
+}
+
+/** One timeline row — two lines: status + step name + agent, then elapsed time or status. */
+@Composable
+private fun TimelineRow(step: PlanStepUi, refTime: Long, running: Boolean) {
+    val c = osColors()
+    val mark = when (step.status) {
+        StepStatus.COMPLETED -> "✓"
+        StepStatus.RUNNING -> "●"
+        StepStatus.FAILED -> "✕"
+        StepStatus.AWAITING_APPROVAL -> "⏸"
+        StepStatus.VERIFIED -> "✓"
+        StepStatus.RECOVERING -> "↻"
+        else -> "○"
+    }
+    val color = when (step.status) {
+        StepStatus.COMPLETED, StepStatus.VERIFIED -> c.success
+        StepStatus.RUNNING, StepStatus.RECOVERING -> c.accent
+        StepStatus.FAILED -> c.error
+        StepStatus.AWAITING_APPROVAL -> c.warning
+        else -> c.textMuted
+    }
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(mark, color = color, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                step.why,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (step.status == StepStatus.PENDING) c.textSecondary else c.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                agentShortName(step.agent),
+                style = MaterialTheme.typography.labelSmall,
+                color = c.textMuted
+            )
+        }
+        // second line — elapsed or status
+        val line2 = when (step.status) {
+            StepStatus.RUNNING -> {
+                val elapsedMs = (refTime - (step.startedAtMs ?: refTime)).coerceAtLeast(0)
+                "${toolDisplayName(step.tool)} · Working… ${formatStepDuration(elapsedMs)}"
+            }
+            StepStatus.COMPLETED, StepStatus.VERIFIED -> {
+                val ms = durationOf(step)
+                if (ms > 0) "${formatStepDuration(ms)}" else toolDisplayName(step.tool)
+            }
+            StepStatus.FAILED -> "Failed"
+            StepStatus.AWAITING_APPROVAL -> "Waiting for you"
+            StepStatus.RECOVERING -> "Trying again…"
+            StepStatus.SKIPPED -> "Skipped"
+            StepStatus.PENDING -> toolDisplayName(step.tool).takeIf { step.tool != null } ?: ""
+        }
+        if (line2.isNotBlank()) {
+            Row(
+                Modifier.padding(start = 22.dp, top = 1.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    line2,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (step.status == StepStatus.RUNNING) c.accent else c.textMuted
+                )
+            }
+        }
+    }
+}
+
+private fun durationOf(step: PlanStepUi): Long {
+    val start = step.startedAtMs ?: return 0
+    val end = step.finishedAtMs ?: return 0
+    return (end - start).coerceAtLeast(0)
+}
+
+/** Friendly short agent label for the timeline. */
+private fun agentShortName(agent: String): String = when {
+    agent.contains("main", ignoreCase = true) -> "Main"
+    agent.contains("android", ignoreCase = true) -> "Android"
+    agent.contains("browser", ignoreCase = true) -> "Browser"
+    agent.contains("terminal", ignoreCase = true) -> "Terminal"
+    agent.contains("research", ignoreCase = true) -> "Research"
+    else -> agent.replaceFirstChar { it.uppercase() }.take(12)
+}
+
+internal fun formatStepDuration(ms: Long): String = when {
+    ms < 1_000 -> "${ms / 100}.${(ms % 100) / 10}s"
+    ms < 10_000 -> String.format("%.1fs", ms / 1000.0)
+    ms < 60_000 -> "${ms / 1000}s"
+    ms < 3_600_000 -> "${ms / 60_000}m ${(ms % 60_000) / 1000}s"
+    else -> "${ms / 3_600_000}h ${(ms % 3_600_000) / 60_000}m"
+}
+
+/* -------------------- Error Recovery Card ------------------------- */
+
+/**
+ * Friendly error card. Heuristics map raw error strings to a human message;
+ * the raw error is preserved under an expandable "Technical details" toggle
+ * for developers.
+ */
+@Composable
+private fun ErrorRecoveryCard(
+    rawError: String,
+    recovering: Boolean,
+    onRetry: () -> Unit,
+    onTryAnother: () -> Unit,
+    onStop: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val c = osColors()
+    val (title, hint) = friendlyError(rawError)
+    var showDetails by remember { mutableStateOf(false) }
+    val chevron by animateFloatAsState(if (showDetails) 180f else 0f, label = "errChev")
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(OsShapes.card)
+            .background(c.errorContainer)
+            .border(1.dp, c.error.copy(alpha = 0.32f), OsShapes.card)
+            .padding(14.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("⚠", style = MaterialTheme.typography.titleSmall, color = c.error)
+            Text(title, style = MaterialTheme.typography.titleSmall, color = c.textPrimary, modifier = Modifier.weight(1f))
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            if (recovering) "$hint AgentOS is trying another method…" else hint,
+            style = MaterialTheme.typography.bodySmall,
+            color = c.textSecondary
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ErrorPillButton(text = "Retry", accent = c.accent, onClick = onRetry)
+            ErrorPillButton(text = "Try another method", accent = c.accentViolet, onClick = onTryAnother)
+            ErrorPillButton(text = "Stop task", accent = c.error, onClick = onStop)
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(OsShapes.pill)
+                .clickable { showDetails = !showDetails }
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Icon(
+                Icons.Rounded.KeyboardArrowDown,
+                contentDescription = null,
+                tint = c.textMuted,
+                modifier = Modifier.size(14.dp).rotate(chevron)
+            )
+            Text(
+                if (showDetails) "Hide technical details" else "Technical details",
+                style = MaterialTheme.typography.labelMedium,
+                color = c.textMuted
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                "Dismiss",
+                style = MaterialTheme.typography.labelMedium,
+                color = c.textMuted,
+                modifier = Modifier.clickable(onClick = onDismiss)
+            )
+        }
+        AnimatedVisibility(
+            visible = showDetails,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut()
+        ) {
+            Text(
+                rawError,
+                style = MonoStyle.copy(fontSize = 11.sp, fontFamily = FontFamily.Monospace),
+                color = c.textSecondary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp)
+                    .clip(OsShapes.cardSmall)
+                    .background(c.codeBg)
+                    .border(1.dp, c.border, OsShapes.cardSmall)
+                    .padding(10.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ErrorPillButton(text: String, accent: Color, onClick: () -> Unit) {
+    val c = osColors()
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = c.textPrimary,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier
+            .clip(OsShapes.pill)
+            .background(accent.copy(alpha = 0.16f))
+            .border(1.dp, accent.copy(alpha = 0.35f), OsShapes.pill)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+    )
+}
+
+/** Heuristic mapping from raw engine errors to a friendly user-facing message. */
+private fun friendlyError(raw: String): Pair<String, String> {
+    val lower = raw.lowercase()
+    val title = when {
+        lower.contains("browser_type failed: no input matching") ||
+            lower.contains("no input matching") -> "Couldn't find the form field on the page"
+        lower.contains("no active window") ||
+            lower.contains("no foreground") -> "The target app didn't come to foreground"
+        lower.contains("network") || lower.contains("timeout") || lower.contains("unreachable") ->
+            "Network issue — couldn't reach the service"
+        lower.contains("permission") || lower.contains("access denied") ->
+            "Missing permission to perform this action"
+        lower.contains("not found") || lower.contains("no such") ->
+            "Couldn't find what was requested"
+        lower.contains("api key") || lower.contains("provider") || lower.contains("unauthorized") ->
+            "AI provider isn't configured correctly"
+        else -> "Something went wrong on this step"
+    }
+    val hint = when {
+        lower.contains("no input matching") -> "The page layout may have changed."
+        lower.contains("no active window") -> "The app may be closed or blocked."
+        lower.contains("network") || lower.contains("timeout") -> "Check your connection and try again."
+        else -> "AgentOS will try a different approach."
+    }
+    return title to hint
+}
+
+/* ----------------------- Completion result ------------------------ */
+
 @Composable
 private fun CompletionResult(ui: ChatUiState) {
     val c = osColors()
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     var copied by remember { mutableStateOf(false) }
-    androidx.compose.runtime.LaunchedEffect(copied) {
+    LaunchedEffect(copied) {
         if (copied) {
             kotlinx.coroutines.delay(1600)
             copied = false
@@ -260,10 +584,12 @@ private fun CompletionResult(ui: ChatUiState) {
     }
     val checkScale by animateFloatAsState(
         targetValue = 1f,
-        animationSpec = OsSprings.celebrate(),
+        animationSpec = androidx.compose.animation.core.spring(
+            dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+            stiffness = androidx.compose.animation.core.Spring.StiffnessLow
+        ),
         label = "checkPop"
     )
-    Spacer(Modifier.height(12.dp))
     Column(
         Modifier
             .fillMaxWidth()
@@ -281,8 +607,8 @@ private fun CompletionResult(ui: ChatUiState) {
             Box(
                 Modifier
                     .scale(if (ui.finalStatus == TaskStatus.COMPLETED) checkScale else 1f)
-                    .size(20.dp)
-                    .clip(CircleShape)
+                    .size(18.dp)
+                    .clip(RoundedCornerShape(50))
                     .background(
                         when (ui.finalStatus) {
                             TaskStatus.COMPLETED -> c.success
@@ -315,7 +641,7 @@ private fun CompletionResult(ui: ChatUiState) {
             )
         }
         ui.finalResult?.takeIf { it.isNotBlank() }?.let { result ->
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
             Text(
                 result,
                 style = MaterialTheme.typography.bodySmall,
@@ -340,174 +666,97 @@ private fun CompletionResult(ui: ChatUiState) {
     }
 }
 
-/** One plan step: ✓ done · ◉ running · ○ pending · ✕ failed — tap to expand results. */
+/* -------------- Running Aura Card (subtle radial glow) ------------- */
+
+/**
+ * A card surface with a slow ambient blue/violet radial gradient glow that
+ * breathes while [active]. Uses [Brush.radialGradient] with low alpha and a
+ * 2000ms infinite transition — restrained, not flashy.
+ */
 @Composable
-fun StepRow(step: PlanStepUi, modifier: Modifier = Modifier) {
+private fun RunningAuraCard(active: Boolean, content: @Composable () -> Unit) {
     val c = osColors()
-    var expanded by rememberSaveable(step.index) { mutableStateOf(false) }
-    val hasDetail = step.result != null || step.error != null || step.tool != null
-    val chevron by animateFloatAsState(if (expanded) 180f else 0f, label = "chev")
-    val runningNow = step.status == StepStatus.RUNNING
-
-    Column(modifier.fillMaxWidth().clickable(enabled = hasDetail) { expanded = !expanded }) {
-        Row(
-            Modifier.padding(vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            val mark = when (step.status) {
-                StepStatus.COMPLETED -> "✓"
-                StepStatus.RUNNING -> "◉"
-                StepStatus.FAILED -> "✕"
-                StepStatus.AWAITING_APPROVAL -> "⏸"
-                else -> "○"
-            }
-            val color = when (step.status) {
-                StepStatus.COMPLETED -> c.success
-                StepStatus.RUNNING -> c.accent
-                StepStatus.FAILED -> c.error
-                StepStatus.AWAITING_APPROVAL -> c.warning
-                else -> c.textMuted
-            }
-            Text(mark, color = color, style = MaterialTheme.typography.titleSmall)
-            Column(Modifier.weight(1f)) {
-                Text(
-                    step.why,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (step.status == StepStatus.PENDING) c.textSecondary else c.textPrimary,
-                    maxLines = 2
-                )
-                if (runningNow) {
-                    Text(
-                        "${toolDisplayName(step.tool)} · working",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = c.accent
+    val breath by com.agentos.app.ui.theme.rememberBreathing(0.20f, 0.65f)
+    val glow = if (active) breath else 0f
+    val corner = 16.dp
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(OsShapes.card)
+            .drawBehind {
+                if (glow > 0.01f) {
+                    // Ambient radial aura behind the card.
+                    drawRoundRect(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                c.accent.copy(alpha = glow * 0.16f),
+                                c.accentViolet.copy(alpha = glow * 0.08f),
+                                Color.Transparent
+                            ),
+                            center = Offset(size.width * 0.5f, size.height * 0.3f),
+                            radius = size.maxDimension * 0.85f
+                        ),
+                        cornerRadius = CornerRadius(corner.toPx())
                     )
-                } else if (step.status == StepStatus.FAILED && step.error != null) {
-                    Text(
-                        step.error!!.take(90),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = c.error,
-                        maxLines = 2
-                    )
-                } else if (step.status == StepStatus.COMPLETED && step.result != null && !expanded) {
-                    Text(
-                        "↳ ${step.result!!.take(70)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = c.textMuted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                    // Subtle top-edge highlight — sells the "alive" state.
+                    drawLine(
+                        brush = Brush.horizontalGradient(
+                            listOf(Color.Transparent, c.accent.copy(alpha = glow * 0.6f), Color.Transparent)
+                        ),
+                        start = Offset(corner.toPx(), 1.5f),
+                        end = Offset(size.width - corner.toPx(), 1.5f),
+                        strokeWidth = 1.5f
                     )
                 }
             }
-            if (hasDetail) {
-                Icon(
-                    Icons.Rounded.KeyboardArrowDown,
-                    contentDescription = if (expanded) "Collapse" else "Expand",
-                    tint = c.textMuted,
-                    modifier = Modifier.size(16.dp).rotate(chevron).alpha(0.7f)
-                )
-            }
-        }
-        // expanded detail: tool + full result/error (real data)
-        AnimatedVisibility(visible = expanded, enter = expandVertically() + fadeIn(), exit = shrinkVertically()) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(start = 28.dp, bottom = 6.dp)
-                    .clip(OsShapes.cardSmall)
-                    .background(c.surface)
-                    .border(1.dp, c.border, OsShapes.cardSmall)
-                    .padding(10.dp)
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    AgentBadge(step.agent)
-                    step.tool?.let {
-                        Text(
-                            it,
-                            style = MonoStyle.copy(fontSize = 10.sp),
-                            color = c.textMuted,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-                step.result?.let { r ->
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        r,
-                        style = MonoStyle.copy(fontSize = 10.sp, fontFamily = FontFamily.Monospace),
-                        color = c.textSecondary,
-                        maxLines = 8,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                step.error?.let { e ->
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        e,
-                        style = MonoStyle.copy(fontSize = 10.sp),
-                        color = c.error,
-                        maxLines = 8,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-        }
-    }
-}
-
-/** Full plan bottom-sheet content. */
-@Composable
-private fun PlanSheetContent(ui: ChatUiState) {
-    val c = osColors()
-    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
-        Text("Task Plan", style = MaterialTheme.typography.titleLarge, color = c.textPrimary)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "${ui.completedSteps} of ${ui.plan.size} completed" + when (ui.finalStatus) {
-                TaskStatus.COMPLETED -> " · completed"
-                TaskStatus.FAILED -> " · failed"
-                TaskStatus.CANCELLED -> " · cancelled"
-                else -> ""
-            },
-            style = MaterialTheme.typography.labelMedium,
-            color = c.textSecondary
-        )
-        Spacer(Modifier.height(14.dp))
-        if (ui.plan.isNotEmpty()) {
-            GradientProgressBar(progress = ui.completedSteps.toFloat() / ui.plan.size, error = ui.finalStatus == TaskStatus.FAILED)
-            Spacer(Modifier.height(14.dp))
-        }
-        LazyColumnSafe(ui)
-        Spacer(Modifier.height(16.dp))
-        val agents = ui.plan.map { it.agent }.distinct()
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            agents.forEach { AgentBadge(it) }
-        }
-    }
-}
-
-@Composable
-private fun LazyColumnSafe(ui: ChatUiState) {
-    androidx.compose.foundation.lazy.LazyColumn(
-        Modifier.heightIn(max = 420.dp).fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(2.dp)
+            .background(c.surfaceHigh)
+            .border(1.dp, if (glow > 0.01f) c.accent.copy(alpha = glow * 0.45f) else c.border, OsShapes.card)
     ) {
-        items(ui.plan.size) { idx ->
-            val step = ui.plan[idx]
-            Column {
-                StepRow(step)
-            }
-        }
+        content()
     }
 }
+
+/** Lighter aura surface used by the Execution Timeline — no extra border highlight. */
+@Composable
+private fun AuraCardSurface(active: Boolean, content: @Composable () -> Unit) {
+    val c = osColors()
+    val breath by com.agentos.app.ui.theme.rememberBreathing(0.15f, 0.50f)
+    val glow = if (active) breath else 0f
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(OsShapes.card)
+            .drawBehind {
+                if (glow > 0.01f) {
+                    drawRoundRect(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                c.accentViolet.copy(alpha = glow * 0.12f),
+                                c.accent.copy(alpha = glow * 0.08f),
+                                Color.Transparent
+                            ),
+                            center = Offset(size.width * 0.85f, size.height * 0.5f),
+                            radius = size.maxDimension * 0.75f
+                        ),
+                        cornerRadius = CornerRadius(16.dp.toPx())
+                    )
+                }
+            }
+            .background(c.surface)
+            .border(1.dp, if (glow > 0.01f) c.borderStrong else c.border, OsShapes.card)
+    ) {
+        content()
+    }
+}
+
+private fun CornerRadius(px: Float) = androidx.compose.ui.geometry.CornerRadius(px, px)
+
+/* ----------------------- Screenshot preview ----------------------- */
 
 /** Small screenshot preview decoded from the real attachment path. */
 @Composable
-fun ScreenshotPreview(att: AttachmentUi, modifier: Modifier = Modifier) {
+private fun ScreenshotPreview(att: AttachmentUi, modifier: Modifier = Modifier) {
     val c = osColors()
-    var full by remember { mutableStateOf(false) }
     val bitmap = remember(att.path) {
         runCatching { BitmapFactory.decodeFile(att.path)?.asImageBitmap() }.getOrNull()
     }
@@ -516,8 +765,7 @@ fun ScreenshotPreview(att: AttachmentUi, modifier: Modifier = Modifier) {
             .aspectRatio(1.6f)
             .clip(RoundedCornerShape(10.dp))
             .background(c.surfaceInteractive)
-            .border(1.dp, c.border, RoundedCornerShape(10.dp))
-            .clickable(enabled = bitmap != null) { full = true },
+            .border(1.dp, c.border, RoundedCornerShape(10.dp)),
         contentAlignment = Alignment.Center
     ) {
         if (bitmap != null) {
@@ -526,20 +774,4 @@ fun ScreenshotPreview(att: AttachmentUi, modifier: Modifier = Modifier) {
             Text("screenshot", style = MonoStyle, color = c.textMuted)
         }
     }
-    if (full && bitmap != null) {
-        androidx.compose.ui.window.Dialog(onDismissRequest = { full = false }) {
-            Image(
-                bitmap,
-                contentDescription = att.caption,
-                modifier = Modifier.fillMaxWidth(),
-                contentScale = ContentScale.Fit
-            )
-        }
-    }
-}
-
-internal fun formatElapsed(seconds: Int): String = when {
-    seconds < 60 -> "${seconds}s"
-    seconds < 3600 -> "${seconds / 60}m ${seconds % 60}s"
-    else -> "${seconds / 3600}h ${(seconds % 3600) / 60}m"
 }

@@ -18,17 +18,19 @@ class BrowserTools(private val engine: BrowserEngine, private val networkMonitor
 
     inner class OpenTool : Tool {
         override val name = "browser_open"
-        override val description = "Opens a URL in the built-in headless browser and waits for the page to load."
+        override val description = "Opens a URL in the built-in headless browser, waits for the page to load and for SPA hydration. Optionally waits for a CSS selector before returning."
         override val risk = ToolRisk.SAFE
         override val category = "Browser"
-        override val inputSchema = """{"url": "string (required)"}"""
+        override val inputSchema = """{"url": "string (required)", "wait_for": "string (optional CSS selector to wait for, e.g. 'input[name=search_query]')", "settle_ms": "int (optional, default 1200)"}"""
 
         override suspend fun execute(args: JsonObject, ctx: ToolContext): ToolResult {
             val url = sanitizeUrl(Args.str(args, "url")).getOrElse { return ToolResult(false, "", it.message ?: "Invalid URL") }
             if (offline()) return ToolResult(false, "", "Device is offline — browser unavailable")
-            ctx.onActivity("Opening $url…")
+            val waitFor = Args.str(args, "wait_for").ifBlank { null }
+            val settleMs = Args.int(args, "settle_ms", 1200).coerceAtLeast(0)
+            ctx.onActivity(if (waitFor != null) "Opening $url and waiting for '$waitFor'…" else "Opening $url…")
             return try {
-                val finalUrl = engine.open(url)
+                val finalUrl = engine.open(url, settleMs = settleMs.toLong(), waitForSelector = waitFor)
                 ToolResult(true, "Loaded page: $finalUrl")
             } catch (e: Exception) {
                 ToolResult(false, "", "browser_open failed: ${e.message}")
@@ -38,7 +40,7 @@ class BrowserTools(private val engine: BrowserEngine, private val networkMonitor
 
     inner class ReadTool : Tool {
         override val name = "browser_read"
-        override val description = "Reads the current page: URL, title and visible text."
+        override val description = "Reads the current page: URL, title, visible text and a list of visible input fields. Use this to discover form fields before typing."
         override val risk = ToolRisk.SAFE
         override val category = "Browser"
         override val inputSchema = """{"max_chars": "int (default 8000)"}"""
@@ -55,7 +57,7 @@ class BrowserTools(private val engine: BrowserEngine, private val networkMonitor
 
     inner class ClickTool : Tool {
         override val name = "browser_click"
-        override val description = "Clicks a link/button on the current page by its visible text."
+        override val description = "Clicks a link/button on the current page by its visible text (case-insensitive substring)."
         override val risk = ToolRisk.MODERATE
         override val category = "Browser"
         override val inputSchema = """{"text": "string (required, visible button/link text)"}"""
@@ -71,10 +73,10 @@ class BrowserTools(private val engine: BrowserEngine, private val networkMonitor
 
     inner class TypeTool : Tool {
         override val name = "browser_type"
-        override val description = "Types text into a form field on the current page and optionally submits the form."
+        override val description = "Types text into a form field on the current page and optionally submits the form. Matcher accepts: '*first*' (first input), '*search*' (glob), plain substring (placeholder/name/aria-label/id/label), or a CSS selector like '#search input'."
         override val risk = ToolRisk.MODERATE
         override val category = "Browser"
-        override val inputSchema = """{"matcher": "string (field hint: placeholder/label/name; '*first*' = first input)", "value": "string (required)", "submit": "bool (default false)"}"""
+        override val inputSchema = """{"matcher": "string (placeholder|name|aria-label|id|label-text or CSS selector; '*' is wildcard, e.g. '*search*' matches anything containing 'search'; '*first*' = first input; default '*first*')", "value": "string (required)", "submit": "bool (default false)"}"""
 
         override suspend fun execute(args: JsonObject, ctx: ToolContext): ToolResult {
             val matcher = Args.str(args, "matcher", "*first*").ifBlank { "*first*" }
@@ -97,6 +99,25 @@ class BrowserTools(private val engine: BrowserEngine, private val networkMonitor
         override suspend fun execute(args: JsonObject, ctx: ToolContext): ToolResult =
             try { ToolResult(true, engine.goBack()) }
             catch (e: Exception) { ToolResult(false, "", "browser_back failed: ${e.message}") }
+    }
+
+    inner class WaitTool : Tool {
+        override val name = "browser_wait"
+        override val description = "Waits for a CSS selector to appear on the current page (or a fixed delay if no selector). Use after browser_open on SPA sites like YouTube/Google before typing/clicking."
+        override val risk = ToolRisk.SAFE
+        override val category = "Browser"
+        override val inputSchema = """{"selector": "string (CSS selector, optional)", "timeout_ms": "int (default 8000)"}"""
+
+        override suspend fun execute(args: JsonObject, ctx: ToolContext): ToolResult {
+            val selector = Args.str(args, "selector").trim()
+            val timeout = Args.int(args, "timeout_ms", 8000).coerceIn(100, 30_000)
+            ctx.onActivity(if (selector.isEmpty()) "Waiting ${timeout}ms…" else "Waiting for '$selector'…")
+            return try {
+                val ok = if (selector.isEmpty()) { engine.delayMs(timeout.toLong()); true }
+                         else engine.waitForSelector(selector, timeout.toLong())
+                ToolResult(ok, if (ok) "ok" else "Timed out waiting for '$selector' after ${timeout}ms")
+            } catch (e: Exception) { ToolResult(false, "", "browser_wait failed: ${e.message}") }
+        }
     }
 
     inner class EvaluateTool : Tool {
@@ -127,6 +148,6 @@ class BrowserTools(private val engine: BrowserEngine, private val networkMonitor
     }
 
     fun all(): List<Tool> = listOf(
-        OpenTool(), ReadTool(), ClickTool(), TypeTool(), BackTool(), EvaluateTool(), UrlTool()
+        OpenTool(), ReadTool(), ClickTool(), TypeTool(), WaitTool(), BackTool(), EvaluateTool(), UrlTool()
     )
 }

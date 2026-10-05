@@ -73,6 +73,8 @@ import com.agentos.app.ui.chat.ChatViewModel
 import com.agentos.app.ui.components.rememberHaptics
 import com.agentos.app.ui.settings.SettingsScreen
 import com.agentos.app.ui.settings.SettingsViewModel
+import com.agentos.app.ui.diagnostics.DiagnosticsScreen
+import com.agentos.app.ui.diagnostics.DiagnosticsViewModel
 import com.agentos.app.ui.tasks.TasksScreen
 import com.agentos.app.ui.tasks.TasksViewModel
 import com.agentos.app.ui.terminal.TerminalScreen
@@ -180,6 +182,7 @@ fun MainApp() {
     val c = osColors()
     var tab by remember { mutableStateOf(AppTab.CHAT) }
     var terminalOpen by remember { mutableStateOf(false) }
+    var diagnosticsOpen by remember { mutableStateOf(false) }
     val haptic = rememberHaptics()
 
     val chatViewModel: ChatViewModel = koinViewModel()
@@ -187,6 +190,7 @@ fun MainApp() {
     val terminalViewModel: TerminalViewModel = koinViewModel()
     val settingsViewModel: SettingsViewModel = koinViewModel()
     val agentsViewModel: AgentsViewModel = koinViewModel()
+    val diagnosticsViewModel: DiagnosticsViewModel = koinViewModel()
 
     val messages by chatViewModel.messages.collectAsState()
     val chatUi by chatViewModel.ui.collectAsState()
@@ -236,14 +240,25 @@ fun MainApp() {
                             val selectedTask by tasksViewModel.selectedTask.collectAsState()
                             val selectedSteps by tasksViewModel.selectedSteps.collectAsState()
                             val tasks by tasksViewModel.tasks.collectAsState()
-                            TasksScreen(tasks, selectedTask, selectedSteps) { id -> tasksViewModel.select(id) }
+                            val allSteps by tasksViewModel.allSteps.collectAsState()
+                            TasksScreen(
+                                tasks = tasks,
+                                selectedTask = selectedTask,
+                                selectedSteps = selectedSteps,
+                                onSelect = { id -> tasksViewModel.select(id) },
+                                onResume = { id -> tasksViewModel.resumeTask(id) },
+                                allSteps = allSteps
+                            )
                         }
                         AppTab.AGENTS -> AgentsScreen(
                             agentsViewModel,
                             onOpenTerminal = { terminalOpen = true },
                             onOpenSettings = { tab = AppTab.SETTINGS }
                         )
-                        AppTab.SETTINGS -> SettingsScreen(settingsViewModel)
+                        AppTab.SETTINGS -> SettingsScreen(
+                            settingsViewModel,
+                            onOpenDiagnostics = { diagnosticsOpen = true }
+                        )
                     }
                 }
             }
@@ -279,6 +294,22 @@ fun MainApp() {
                         onTestTermux = { terminalViewModel.testTermux() }
                     )
                 }
+            }
+        }
+
+        // full-screen Diagnostics overlay (reached from Settings → Developer).
+        // Hides the bottom bar and returns to Settings on back press.
+        AnimatedVisibility(
+            visible = diagnosticsOpen,
+            enter = fadeIn(tween(OsMotion.Normal)) + slideInVertically(initialOffsetY = { it / 8 }, animationSpec = tween(OsMotion.Normal)),
+            exit = fadeOut(tween(OsMotion.Fast))
+        ) {
+            BackHandler(enabled = diagnosticsOpen) { diagnosticsOpen = false }
+            Surface(Modifier.fillMaxSize().background(c.bg), color = c.bg) {
+                DiagnosticsScreen(
+                    viewModel = diagnosticsViewModel,
+                    onClose = { diagnosticsOpen = false }
+                )
             }
         }
     }

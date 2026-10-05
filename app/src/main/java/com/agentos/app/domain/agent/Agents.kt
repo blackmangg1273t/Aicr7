@@ -5,8 +5,15 @@ import com.agentos.app.data.provider.ChatTurn
 import com.agentos.app.domain.model.AgentTask
 import com.agentos.app.domain.model.TaskStep
 import com.agentos.app.domain.tools.ToolContext
-import kotlinx.serialization.json.booleanOrNull
 import com.agentos.app.domain.tools.ToolRegistry
+import com.agentos.app.domain.tools.ToolResult
+import kotlinx.coroutines.delay
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /* ------------------------------------------------------------------ */
 /* Research Agent — real multi-source research                         */
@@ -28,10 +35,9 @@ class ResearchAgent(private val registry: ToolRegistry, private val toolCtx: Too
 
         // Optionally deep-fetch the first result for richer data
         val argsObj = runCatching {
-            kotlinx.serialization.json.Json.parseToJsonElement(step.argsJson)
-                .let { it as? kotlinx.serialization.json.JsonObject }
+            Json.parseToJsonElement(step.argsJson).let { it as? JsonObject }
         }.getOrNull()
-        val fetchTop = (argsObj?.get("fetch_top") as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull == true
+        val fetchTop = argsObj?.get("fetch_top")?.jsonPrimitive?.booleanOrNull == true
         val deep = if (fetchTop) {
             val firstUrl = searchResult.output.lineSequence()
                 .firstOrNull { it.startsWith("URL: ") }?.removePrefix("URL: ")
@@ -50,12 +56,16 @@ class ResearchAgent(private val registry: ToolRegistry, private val toolCtx: Too
 /* Browser Agent — real WebView automation                             */
 /* ------------------------------------------------------------------ */
 
-class BrowserAgent(private val registry: ToolRegistry, private val toolCtx: ToolContext) : BaseAgent() {
+class BrowserAgent(
+    private val registry: ToolRegistry,
+    private val toolCtx: ToolContext,
+    private val engine: BrowserEngine? = null
+) : BaseAgent() {
 
     override val name = "browser"
     override val displayName = "Browser Agent"
-    override val description = "Drives the built-in headless browser: opens pages, reads content, clicks, fills forms, navigates."
-    override val capabilities = listOf("open_pages", "read_dom", "click_elements", "fill_forms", "js_evaluation")
+    override val description = "Drives the built-in headless browser: opens pages, reads content, clicks, fills forms, navigates. Auto-reads after browser_open and after a form submit so the planner sees the result."
+    override val capabilities = listOf("open_pages", "read_dom", "click_elements", "fill_forms", "js_evaluation", "wait_for_elements")
 
     override fun allowedTools() = listOf("browser_", "web_fetch")
 
@@ -64,12 +74,38 @@ class BrowserAgent(private val registry: ToolRegistry, private val toolCtx: Tool
         val result = execTool(registry, step.toolName!!, step.argsJson, toolCtx)
         if (!result.success) throw RuntimeException("${step.toolName} failed: ${result.error}")
 
-        // After opening a page, automatically read its content if the plan expects data
+        // After opening a page, automatically read its content so the planner
+        // sees what's actually on the page (post-SPA-settle).
         if (step.toolName == "browser_open") {
             ctx.onActivity("Extracting page content…")
+            // Brief settle for late SPA hydration.
+            engine?.delayMs(300)
             val read = execTool(registry, "browser_read", "{}", toolCtx)
-            return result.output + "\n\n" + if (read.success) read.output else "(page read failed: ${read.error})"
+            return result.output + "\n\n" + (if (read.success) read.output else "(page read failed: ${read.error})")
         }
+
+        // After a form submit, the page may have navigated — auto-read so the
+        // LLM sees the result page (search results, etc.) instead of the
+        // form page's old content.
+        val submitFlag = runCatching {
+            val obj = Json.parseToJsonElement(step.argsJson).let { it as? JsonObject } ?: JsonObject(emptyMap())
+            obj["submit"]?.jsonPrimitive?.booleanOrNull == true ||
+            obj["submit"]?.jsonPrimitive?.boolean == true
+        }.getOrDefault(false)
+        if (step.toolName == "browser_type" && submitFlag) {
+            ctx.onActivity("Reading post-submit page…")
+            engine?.delayMs(1_500)   // let navigation settle
+            val read = execTool(registry, "browser_read", "{}", toolCtx)
+            return result.output + "\n\n" + (if (read.success) read.output else "(post-submit read failed: ${read.error})")
+        }
+
+        // After a click, a small delay + read helps with SPA navigation.
+        if (step.toolName == "browser_click") {
+            engine?.delayMs(800)
+            val read = execTool(registry, "browser_read", "{}", toolCtx)
+            return result.output + "\n\n" + (if (read.success) read.output else "(post-click read failed: ${read.error})")
+        }
+
         return result.output
     }
 }
@@ -82,7 +118,7 @@ class AndroidAgent(private val registry: ToolRegistry, private val toolCtx: Tool
 
     override val name = "android"
     override val displayName = "Android Agent"
-    override val description = "Automates the phone UI: launches apps, taps, types, scrolls and reads the screen (requires user-enabled accessibility)."
+    override val description = "Automates the phone UI: launches apps, taps, types, scrolls and reads the screen (requires user-enabled accessibility). Adds a brief settle delay after launch_app so the next step finds a stable UI."
     override val capabilities = listOf("launch_apps", "screen_tap", "screen_type", "screen_read", "gestures")
 
     override fun allowedTools() = listOf(
@@ -94,9 +130,20 @@ class AndroidAgent(private val registry: ToolRegistry, private val toolCtx: Tool
         val result = execTool(registry, step.toolName!!, step.argsJson, toolCtx)
         if (!result.success) throw RuntimeException("${step.toolName} failed: ${result.error}")
 
-        // Verify Android automation results when possible: after a tap/type, take a snapshot
+        // After launch_app, give the newly-opened app a moment to render its
+        // UI before the next step touches it. The accessibility service has
+        // already waited for the package to be foreground (inside LaunchAppTool),
+        // but the in-app UI needs a tiny extra settle for first-frame.
+        if (step.toolName == "launch_app") {
+            ctx.onActivity("Letting the app settle…")
+            delay(400)
+        }
+
+        // Verify Android automation results when possible: after a tap/type/click,
+        // take a snapshot so the planner can verify the screen changed.
         if (step.toolName in listOf("ui_tap", "ui_click_text", "ui_type")) {
             ctx.onActivity("Verifying screen state…")
+            delay(250)   // let the UI react
             val snap = execTool(registry, "ui_snapshot", "{}", toolCtx)
             return result.output + if (snap.success) "\n\nScreen after action:\n${snap.output.take(1500)}" else ""
         }

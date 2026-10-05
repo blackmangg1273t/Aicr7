@@ -113,12 +113,44 @@ class TaskRepository(private val db: AppDatabase, private val saveTasks: suspend
     fun observeTask(id: String): Flow<TaskEntity?> = db.taskDao().observeById(id)
     fun observeSteps(taskId: String): Flow<List<TaskStepEntity>> = db.taskStepDao().observeForTask(taskId)
 
+    /** Returns all tasks in any active state — used at app startup to detect orphans. */
+    suspend fun activeTasks(): List<AgentTask> = db.taskDao().byStatuses(
+        listOf(
+            TaskStatus.PENDING.name, TaskStatus.PLANNING.name, TaskStatus.PLAN_READY.name,
+            TaskStatus.RUNNING.name, TaskStatus.WAITING_USER.name,
+            TaskStatus.RECOVERING.name, TaskStatus.REPLANNING.name, TaskStatus.VERIFYING.name
+        )
+    ).map { it.toModel() }
+
+    /** Marks all active tasks as INTERRUPTED — called once at app startup to clean up after a process kill. */
+    suspend fun markActiveTasksInterrupted(): Int {
+        val now = System.currentTimeMillis()
+        return db.taskDao().bulkUpdateStatus(
+            listOf(
+                TaskStatus.PENDING.name, TaskStatus.PLANNING.name, TaskStatus.PLAN_READY.name,
+                TaskStatus.RUNNING.name, TaskStatus.WAITING_USER.name,
+                TaskStatus.RECOVERING.name, TaskStatus.REPLANNING.name, TaskStatus.VERIFYING.name
+            ),
+            TaskStatus.INTERRUPTED.name,
+            "Interrupted by process restart",
+            now
+        )
+    }
+
     suspend fun wipeAll() {
         db.taskDao().clearAllSteps()
         db.taskDao().clearAll()
         Logger.i("TaskRepo", "All tasks wiped by user")
     }
 }
+
+/** Maps a TaskEntity row to an AgentTask model. */
+private fun TaskEntity.toModel(): AgentTask = AgentTask(
+    id = id, userRequest = userRequest,
+    status = runCatching { TaskStatus.valueOf(status) }.getOrDefault(TaskStatus.FAILED),
+    finalResult = finalResult, error = error,
+    createdAt = createdAt, updatedAt = updatedAt, conversationId = conversationId
+)
 
 class MemoryRepository(private val db: AppDatabase) {
 
